@@ -115,8 +115,10 @@ use openspec_app::review_skip::{PatternError, ReviewSkipPatterns, SkipPatternsOu
 use openspec_app::service::{ArtifactRead, IdentityInfo};
 use openspec_app::settings::{
     Appearance, BitbucketConfigView, ColorScheme, DocumentWidth, GithubConfigView, PanelPosition,
-    StoredCredentialSource, TailscaleConfig, Theme, WebServerConfig,
+    PrContentLoading, PrContentPreference, StoredCredentialSource, TailscaleConfig, Theme,
+    WebServerConfig,
 };
+use openspec_app::{ContentImageFailure, PullRequestContentImageOutcome};
 
 use openspec_core::dashboard::{
     DashboardData, HeatmapCell, ProgressData, RepoBreakdown, ShipEntry, StreakInfo, SummaryMetrics,
@@ -140,6 +142,89 @@ use openspec_core::types::{
 use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
+
+#[test]
+fn content_image_outcomes_match_the_typescript_mirror_and_redact_debug() {
+    let image = PullRequestContentImageOutcome::Image {
+        mime: "image/png".into(),
+        width: 1,
+        height: 2,
+        data: "sensitive-image-bytes".into(),
+        final_host: "cdn.example".into(),
+    };
+    assert!(!format!("{image:?}").contains("sensitive-image-bytes"));
+    assert_camel_case("PullRequestContentImageOutcome", &image);
+    assert_eq!(
+        serde_json::to_value(image).unwrap(),
+        serde_json::json!({
+            "kind":"image", "mime":"image/png", "width":1, "height":2,
+            "data":"sensitive-image-bytes", "finalHost":"cdn.example"
+        })
+    );
+    for reason in [
+        ImageRefusal::Lfs,
+        ImageRefusal::TooLarge,
+        ImageRefusal::NotImage,
+        ImageRefusal::TooManyPixels,
+    ] {
+        assert_camel_case(
+            "ContentImageRefusal",
+            PullRequestContentImageOutcome::Refused { reason },
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(PullRequestContentImageOutcome::Stale).unwrap(),
+        serde_json::json!({"kind":"stale"})
+    );
+    for (reason, expected) in [
+        (ContentImageFailure::Refused, "refused"),
+        (ContentImageFailure::UnsafeSource, "unsafeSource"),
+        (ContentImageFailure::UnsafeAddress, "unsafeAddress"),
+        (ContentImageFailure::Unavailable, "unavailable"),
+        (ContentImageFailure::Redirected, "redirected"),
+        (ContentImageFailure::Transient, "transient"),
+        (ContentImageFailure::Deferred, "deferred"),
+    ] {
+        let outcome = PullRequestContentImageOutcome::Failed {
+            reason,
+            until_unix: Some(123),
+        };
+        assert_camel_case("ContentImageFailure", &outcome);
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap(),
+            serde_json::json!({
+                "kind":"failed", "reason":expected, "untilUnix":123
+            })
+        );
+    }
+}
+
+#[test]
+fn pr_content_loading_matches_its_typescript_mirror() {
+    let preferences = PrContentLoading {
+        auto_show_images: true,
+        auto_load_large_diffs: false,
+    };
+    assert_camel_case("PrContentLoading", preferences);
+    assert_eq!(
+        serde_json::to_value(preferences).unwrap(),
+        serde_json::json!({"autoShowImages":true,"autoLoadLargeDiffs":false})
+    );
+    for (key, name) in [
+        (PrContentPreference::AutoShowImages, "autoShowImages"),
+        (
+            PrContentPreference::AutoLoadLargeDiffs,
+            "autoLoadLargeDiffs",
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(key).unwrap(), name);
+        assert_eq!(
+            serde_json::from_value::<PrContentPreference>(serde_json::json!(name)).unwrap(),
+            key
+        );
+    }
+    assert!(serde_json::from_value::<PrContentPreference>(serde_json::json!("other")).is_err());
+}
 
 // ---------------------------------------------------------------- the walker
 

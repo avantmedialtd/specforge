@@ -691,6 +691,8 @@ export const EVENT_PULL_REQUEST_PROVIDER_CHANGED = "pull-request-provider-change
 /// `review-progress-changed`: a theme chosen in a served tab reaches every
 /// desktop window, and one chosen on the desktop reaches every tab.
 export const EVENT_APPEARANCE_CHANGED = "appearance-changed"
+/// Service notice carrying only the effective `PrContentLoading` pair.
+export const EVENT_PR_CONTENT_LOADING_CHANGED = "pr-content-loading-changed"
 /// The review skip patterns were stored, the empty list included; carries
 /// `ReviewSkipPatternsChangedPayload`. Every pull-request view reads its review
 /// progress again, and an open Settings view shows the list. A direct emit on
@@ -795,6 +797,15 @@ export interface Appearance {
     theme: Theme
     scheme: ColorScheme
 }
+
+/// Shared opt-in PR loading preferences (`openspec_app::settings`).
+export interface PrContentLoading {
+    autoShowImages: boolean
+    autoLoadLargeDiffs: boolean
+}
+
+/// A transaction changes one preference without replacing its neighbour.
+export type PrContentPreference = "autoShowImages" | "autoLoadLargeDiffs"
 
 // Opt-in BitBucket and GitHub pull-request panels (mirrors
 // `openspec_app::settings`'s `PanelPosition` / `BitbucketConfigView` /
@@ -1139,6 +1150,17 @@ export type PullRequestImageOutcome =
     | { kind: "images"; old: ImageSide; new: ImageSide }
     | { kind: "changed" }
     | { kind: "failed"; reason: FileReadFailure; untilUnix: number | null }
+
+/// Credentialless embedded-image reads, separate from provider version reads.
+export type ContentImageFailure =
+    | "refused" | "unsafeSource" | "unsafeAddress" | "unavailable"
+    | "redirected" | "transient" | "deferred"
+
+export type PullRequestContentImageOutcome =
+    | { kind: "image"; mime: string; width: number; height: number; data: string; finalHost: string }
+    | { kind: "refused"; reason: ImageRefusal }
+    | { kind: "stale" }
+    | { kind: "failed"; reason: ContentImageFailure; untilUnix: number | null }
 
 export type PullRequestDetailOutcome =
     | { kind: "detail"; detail: PullRequestDetail }

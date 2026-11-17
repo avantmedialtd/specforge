@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::pull_request_detail::PullRequestReference;
-use crate::settings::{Appearance, PanelPosition};
+use crate::settings::{Appearance, PanelPosition, PrContentLoading};
 
 /// Emitted whenever a debounced batch of filesystem events caused the cache for
 /// a workspace to be refreshed.
@@ -165,6 +165,9 @@ pub const EVENT_REVIEW_SKIP_PATTERNS_CHANGED: &str = "review-skip-patterns-chang
 /// width's is, would reach its own transport alone, and the scenario *A
 /// browser tab adopts a change made on the desktop* would not hold.
 pub const EVENT_APPEARANCE_CHANGED: &str = "appearance-changed";
+/// The effective loading pair after a successful stored preference update.
+/// Service-owned so desktop and served clients hear the same update.
+pub const EVENT_PR_CONTENT_LOADING_CHANGED: &str = "pr-content-loading-changed";
 
 /// Which pull-request provider a panel — or a panel event — belongs to. The
 /// two panels are independent twins (`github-pull-requests`: *Opt-in GitHub
@@ -198,6 +201,7 @@ pub enum ServiceNotice {
     PullRequestProviderChanged(PullRequestProviderChangedPayload),
     /// The appearance — theme and scheme together — was stored.
     AppearanceChanged(Appearance),
+    PrContentLoadingChanged(PrContentLoading),
 }
 
 /// The payload of [`EVENT_REVIEW_SKIP_PATTERNS_CHANGED`]: the skip patterns now
@@ -303,6 +307,9 @@ pub fn notice_envelope(notice: &ServiceNotice) -> (&'static str, Value) {
         }
         ServiceNotice::AppearanceChanged(appearance) => {
             (EVENT_APPEARANCE_CHANGED, to_value(appearance))
+        }
+        ServiceNotice::PrContentLoadingChanged(preferences) => {
+            (EVENT_PR_CONTENT_LOADING_CHANGED, to_value(preferences))
         }
     }
 }
@@ -643,6 +650,21 @@ mod tests {
         ] {
             assert_ne!(EVENT_APPEARANCE_CHANGED, other);
         }
+    }
+
+    #[test]
+    fn pr_content_loading_notice_contains_only_the_effective_pair() {
+        let (name, payload) =
+            notice_envelope(&ServiceNotice::PrContentLoadingChanged(PrContentLoading {
+                auto_show_images: true,
+                auto_load_large_diffs: false,
+            }));
+        assert_eq!(name, "pr-content-loading-changed");
+        assert!(!CACHE_EVENT_NAMES.contains(&name));
+        assert_eq!(
+            payload,
+            serde_json::json!({"autoShowImages": true, "autoLoadLargeDiffs": false})
+        );
     }
 
     /// The skip patterns' event is the literal `src/types.ts` mirrors by hand,

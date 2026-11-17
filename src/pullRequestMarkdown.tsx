@@ -16,13 +16,15 @@
 // so `bun test` can render these pieces through react-markdown, which is the
 // only coverage they get: a frontend-only diff skips the mutation gate.
 
-import { createContext, useContext } from "react"
+import { Fragment, createContext, useCallback, useContext, useState } from "react"
 import type { ComponentProps, ComponentType, ReactElement, ReactNode } from "react"
 import type { Element, ElementContent } from "hast"
 import type { Root, RootContent } from "mdast"
 import type { Components, ExtraProps } from "react-markdown"
 import { hrefScheme } from "./links"
 import type { PullRequestReference } from "./types"
+import { PullRequestContentImage } from "./components/PullRequestContentImage"
+import { PrImageLinkRetries } from "./components/PullRequestLoadingContext"
 
 /** KaTeX's non-trusting posture: an invalid expression renders its source
  * in place instead of throwing (`throwOnError`), a command that would emit
@@ -185,9 +187,29 @@ function contentLink(
     host: PullRequestLinkHost,
     children: ReactNode,
 ): ReactElement {
+    const onClick = link.kind === "open" && !host.web
+        ? (event: { preventDefault(): void }) => { event.preventDefault(); host.open(link.url) }
+        : undefined
+    return <ContentLink link={link} host={host} onClick={onClick}>{children}</ContentLink>
+}
+
+function ContentLink({ link, host, children, onClick }: {
+    link: PullRequestHref; host: PullRequestLinkHost; children: ReactNode
+    onClick?: (event: { preventDefault(): void }) => void
+}) {
+    const [controls, setControls] = useState<ReadonlyMap<string, ReactNode>>(() => new Map())
+    const register = useCallback((id: string, control: ReactNode | null) => {
+        setControls(previous => {
+            if ((previous.get(id) ?? null) === control) { return previous }
+            const next = new Map(previous)
+            if (control === null) { next.delete(id) } else { next.set(id, control) }
+            return next
+        })
+    }, [])
     const inner = <InsideLink.Provider value={true}>{children}</InsideLink.Provider>
+    let rendered: ReactElement
     if (link.kind === "open") {
-        return host.web ? (
+        rendered = host.web ? (
             <a
                 href={link.url}
                 target="_blank"
@@ -200,19 +222,16 @@ function contentLink(
             <a
                 href={link.url}
                 className="markdown-link markdown-link--external"
-                onClick={(event) => {
-                    event.preventDefault()
-                    host.open(link.url)
-                }}
+                onClick={onClick}
             >
                 {inner}
             </a>
         )
-    }
+    } else {
     // No anchor and no href, so nothing opens it by any interaction: not a
     // middle-click and not a context menu. The same dimmed span the browser
     // skin gives a workspace-file link, with a relative target in its tooltip.
-    return (
+    rendered = (
         <span
             className="markdown-link markdown-link--unavailable"
             title={link.kind === "relative" ? link.target : undefined}
@@ -220,6 +239,11 @@ function contentLink(
             {inner}
         </span>
     )
+    }
+    return <PrImageLinkRetries.Provider value={register}>
+        {rendered}
+        {[...controls].map(([id, control]) => <Fragment key={id}>{control}</Fragment>)}
+    </PrImageLinkRetries.Provider>
 }
 
 /// What an image shows instead of itself: its alt text, or "image" when it has
@@ -251,7 +275,8 @@ function ContentImage({
     const insideLink = useContext(InsideLink)
     const link = pullRequestHref(src)
     const label = imageLabel(alt, link.kind === "open" ? link.host : null)
-    return insideLink ? label : contentLink(link, host, label)
+    const fallback = insideLink ? label : contentLink(link, host, label)
+    return <PullRequestContentImage source={src} alt={alt} insideLink={insideLink} fallback={fallback} />
 }
 
 /// How the host draws a fence this mode leaves alone: the workspace renderer's

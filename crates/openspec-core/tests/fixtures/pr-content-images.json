@@ -1,0 +1,87 @@
+[
+  {
+    "name": "inline",
+    "markdown": "Before ![screen](https://images.example/screen.png) after.",
+    "sources": ["https://images.example/screen.png"]
+  },
+  {
+    "name": "reference",
+    "markdown": "![screen][shot]\n\n[shot]: https://images.example/screen.png \"Screen\"",
+    "sources": ["https://images.example/screen.png"]
+  },
+  {
+    "name": "linked image",
+    "markdown": "[![screen](https://images.example/screen.png)](https://example.com/details)",
+    "sources": ["https://images.example/screen.png"]
+  },
+  {
+    "name": "escapes and entities",
+    "markdown": "![screen](https://images.example/a\\(1\\).png?x=1&amp;y=2)",
+    "sources": ["https://images.example/a(1).png?x=1&y=2"]
+  },
+  {
+    "name": "canonical fragment and signed query",
+    "markdown": "![screen](HTTPS://IMAGES.EXAMPLE.:443/a%2fb.png?sig=A%2FB+z#view)",
+    "sources": ["https://images.example/a%2fb.png?sig=A%2FB+z"]
+  },
+  {
+    "name": "code fence",
+    "markdown": "```markdown\n![screen](https://images.example/screen.png)\n```",
+    "sources": []
+  },
+  {
+    "name": "inline code",
+    "markdown": "`![screen](https://images.example/screen.png)`",
+    "sources": []
+  },
+  {
+    "name": "HTML image",
+    "markdown": "<img src=\"https://images.example/screen.png\">",
+    "sources": []
+  },
+  {
+    "name": "HTML comment",
+    "markdown": "<!-- ![screen](https://images.example/screen.png) -->",
+    "sources": []
+  },
+  {
+    "name": "ordinary link",
+    "markdown": "[screen](https://images.example/screen.png)",
+    "sources": []
+  },
+  {
+    "name": "relative and data sources",
+    "markdown": "![local](./screen.png) ![data](data:image/png;base64,AAAA)",
+    "sources": []
+  },
+  {
+    "name": "userinfo and non-default port",
+    "markdown": "![auth](https://u:p@images.example/a) ![port](https://images.example:8443/a)",
+    "sources": []
+  },
+  {
+    "name": "IP literal and local-only name",
+    "markdown": "![ip](https://127.0.0.1/a) ![local](https://a.localhost/a)",
+    "sources": []
+  },
+  {
+    "name": "GFM table",
+    "markdown": "| Screen |\n| --- |\n| ![screen](https://images.example/a.png) |",
+    "sources": ["https://images.example/a.png"]
+  },
+  {
+    "name": "unescaped pipe splits a GFM table image",
+    "markdown": "| Screen |\n| --- |\n| ![screen](https://images.example/a|b.png) |",
+    "sources": []
+  },
+  {
+    "name": "unicode hostname",
+    "markdown": "![screen](https://bücher.example/a.png)",
+    "sources": ["https://xn--bcher-kva.example/a.png"]
+  },
+  {
+    "name": "duplicate canonical sources",
+    "markdown": "![one](https://images.example/a#one) ![two](https://IMAGES.EXAMPLE.:443/a#two)",
+    "sources": ["https://images.example/a"]
+  }
+]

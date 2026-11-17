@@ -19,6 +19,8 @@
         "allow-get-github-config",
         "allow-get-github-pull-requests",
         "allow-get-pull-request-detail",
+        "allow-get-pr-content-loading",
+        "allow-get-pull-request-content-image",
         "allow-get-pull-request-file",
         "allow-get-pull-request-file-image",
         "allow-get-pull-request-links",

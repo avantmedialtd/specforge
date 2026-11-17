@@ -301,6 +301,7 @@ mod tests {
                 enabled: true,
             }),
             ServiceNotice::AppearanceChanged(openspec_app::Appearance::default()),
+            ServiceNotice::PrContentLoadingChanged(openspec_app::PrContentLoading::default()),
         ];
         for notice in &notices {
             assert_ne!(

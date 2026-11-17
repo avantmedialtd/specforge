@@ -203,6 +203,61 @@ async function mount(
     }
 }
 
+describe("automatic PR loading settings", () => {
+    for (const desktop of [false, true]) {
+        test(`provider visibility and fixed order (${desktop ? "desktop" : "web"})`, async () => {
+            for (const [githubOn, bitbucketOn] of [[false, false], [true, false], [false, true]]) {
+                const transport = (desktop ? installDesktop : installBrowser)({
+                    ...baseAnswers(() => githubConfig({ enabled: githubOn }), () => bitbucketConfig({ enabled: bitbucketOn })),
+                    get_pr_content_loading: () => ({ autoShowImages: true, autoLoadLargeDiffs: false }),
+                })
+                const mounted = await mount(desktop)
+                try {
+                    const image = inputById(mounted.container, "settings-auto-show-images")
+                    const diff = inputById(mounted.container, "settings-auto-load-large-diffs")
+                    expect(!!image).toBe(githubOn || bitbucketOn)
+                    expect(!!diff).toBe(githubOn || bitbucketOn)
+                    if (image) {
+                        const text = mounted.container.textContent
+                        expect(text.indexOf("BitBucket pull requests")).toBeLessThan(text.indexOf("Automatically show images"))
+                        expect(text.indexOf("Automatically show images")).toBeLessThan(text.indexOf("Automatically load large diffs"))
+                        expect(text.indexOf("Automatically load large diffs")).toBeLessThan(text.indexOf("Skip in review"))
+                        expect(text).toContain("IP address of the machine running SpecForge")
+                        expect((image as unknown as { checked: boolean }).checked).toBe(true)
+                        expect((diff as unknown as { checked: boolean }).checked).toBe(false)
+                    }
+                } finally { await mounted.unmount(); transport.uninstall() }
+            }
+        })
+    }
+
+    test("each switch stores only its own preference and failed saves stay row-local", async () => {
+        const pair = { autoShowImages: true, autoLoadLargeDiffs: false }
+        let fail = false
+        const transport = installBrowser({
+            ...baseAnswers(() => githubConfig({ enabled: true }), () => bitbucketConfig()),
+            get_pr_content_loading: () => ({ ...pair }),
+            set_pr_content_loading: args => {
+                if (fail) { throw new Error("disk unavailable") }
+                pair[args.preference as keyof typeof pair] = args.enabled as boolean
+                return { ...pair }
+            },
+        })
+        const mounted = await mount(false)
+        try {
+            await fire(switchById(mounted.container, "settings-auto-load-large-diffs"), "onChange", { currentTarget: { checked: true } })
+            await settle(1)
+            expect(pair).toEqual({ autoShowImages: true, autoLoadLargeDiffs: true })
+            expect(transport.calls("set_pr_content_loading")[0].args).toEqual({ preference: "autoLoadLargeDiffs", enabled: true })
+            fail = true
+            await fire(switchById(mounted.container, "settings-auto-show-images"), "onChange", { currentTarget: { checked: false } })
+            await settle(1)
+            expect(pair.autoShowImages).toBe(true)
+            expect(mounted.container.textContent).toContain("Couldn't save this setting.")
+        } finally { await mounted.unmount(); transport.uninstall() }
+    })
+})
+
 describe("the native credential editor", () => {
     test("a failed token save reports on the control and re-reads the stored source state", async () => {
         let github = githubConfig({

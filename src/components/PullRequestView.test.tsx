@@ -3,6 +3,8 @@ import { act } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../testing/fakeDom"
 import { minimisedText } from "../pullRequestView"
+import { installFakeTransport, settle } from "../testing/fakeTransport"
+import { prProgressReconciler } from "../prContentLoading"
 import { MAX_BODY_BYTES } from "../reviewActions"
 import {
     DraftItemsEditorContext,
@@ -55,6 +57,28 @@ const ADDRESS: PullRequestAddress = {
 }
 
 const URL_42 = "https://github.com/acme/api/pull/42"
+
+test("concurrent automatic file loads reconcile progress once more after the final hunks, and stop on close", async () => {
+    const pending: (() => void)[] = []
+    let reads = 0
+    const reconciler = prProgressReconciler(() => {
+        reads++
+        return new Promise<void>(resolve => { pending.push(resolve) })
+    })
+    reconciler.request()
+    reconciler.request()
+    reconciler.request()
+    expect(reads).toBe(1)
+    pending.shift()!()
+    for (let i = 0; i < 8; i++) { await Promise.resolve() }
+    expect(reads).toBe(2)
+    reconciler.request()
+    reconciler.dispose()
+    pending.shift()!()
+    for (let i = 0; i < 8; i++) { await Promise.resolve() }
+    reconciler.request()
+    expect(reads).toBe(2)
+})
 
 test("the discussion index never leaks minimized or deleted bodies into excerpts", () => {
     const minimized = thread("minimized", {
@@ -550,6 +574,7 @@ async function mountFiles(
     detail: PullRequestDetail,
     progress: ReviewProgress | null = null,
     editor: ReviewDraftEditor | null = null,
+    onFileRefused: () => void = () => {},
 ) {
     const container = dom.document.createElement("div")
     const root = createRoot(container as unknown as Element)
@@ -561,7 +586,7 @@ async function mountFiles(
                 reference={REFERENCE}
                 progress={nextProgress}
                 reloadProgress={() => Promise.resolve(nextProgress)}
-                onFileRefused={() => {}}
+                onFileRefused={onFileRefused}
             />
         )
         return currentEditor === null ? (
@@ -707,6 +732,42 @@ describe("review threads render where their line is", () => {
         widths.sections = 2000
         FakeResizeObserver.all.length = 0
         g.localStorage = { getItem: () => null, setItem: () => {} }
+    })
+
+    test("stale batches refresh once per current model, and old replies cannot refresh its replacement", async () => {
+        const pending: ((value: unknown) => void)[] = []
+        const requests: Record<string, unknown>[] = []
+        const transport = installFakeTransport((command, args) => {
+            if (command !== "get_pull_request_file") { throw new Error(`unexpected ${command}`) }
+            requests.push(args)
+            return new Promise(resolve => { pending.push(resolve) })
+        })
+        let refreshes = 0
+        const files = () => ["a.ts", "b.ts"].map(path => changedFile(path, { content: { kind: "withheld" } }))
+        const detail = detailWith([], files())
+        const view = await mountFiles(detail, null, null, () => { refreshes++ })
+        const load = (path: string) => press(sectionOf(view.container, path).findAll("button")
+            .find(button => button.textContent === "Load diff")!)
+        try {
+            await load("a.ts")
+            await load("b.ts")
+            expect(requests).toEqual(["a.ts", "b.ts"].map(path => ({
+                reference: REFERENCE, path, head: detail.headCommit, base: detail.baseCommit,
+            })))
+            await act(async () => pending[0]({ kind: "changed" }))
+            await settle(1)
+            expect(refreshes).toBe(1)
+            const replacement = { ...detail, files: files(), headCommit: "new-head" }
+            await view.rerender(replacement, null)
+            await load("a.ts")
+            expect(requests[2].head).toBe("new-head")
+            await act(async () => pending[2]({ kind: "changed" }))
+            await settle(1)
+            expect(refreshes).toBe(2)
+            await act(async () => pending[1]({ kind: "changed" }))
+            await settle(1)
+            expect(refreshes).toBe(2)
+        } finally { await view.unmount(); transport.uninstall() }
     })
 
     test("compact navigator controls retain labels, exact counts and functional search/filter clearing", async () => {

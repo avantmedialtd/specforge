@@ -4,7 +4,8 @@ import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../tes
 import { fileKey, type NavigatorReviewBadge } from "../diffFiles"
 import { DIFF_LAYOUT_STORAGE_KEY } from "../diffLayout"
 import { createSlotCache, lineSlotLookup } from "../slotCache"
-import type { DiffFile, Hunk, Line } from "../types"
+import type { DiffFile, Hunk, Line, ImageVersions } from "../types"
+import { PrContentLoading } from "../prContentLoading"
 import { DiffView, type DiffNavigation, type FileSlots } from "./DiffView"
 
 // `diff-view`: *Provider-Neutral Diff Line Slots* and *Diff View Hosts*. The
@@ -250,7 +251,9 @@ interface MountOptions {
     visible?: boolean
     navigation?: DiffNavigation
     loadFile?: (file: DiffFile) => Promise<DiffFile>
-    readImage?: () => Promise<never>
+    readImage?: () => Promise<ImageVersions>
+    imageReads?: "nearView" | "onRequest"
+    automaticReads?: PrContentLoading
     zoomImage?: (file: DiffFile) => void
 }
 
@@ -270,6 +273,7 @@ async function mount(
     options: MountOptions = {},
 ): Promise<Mounted> {
     const container = dom.document.createElement("div")
+    if (options.automaticReads) { dom.document.body.appendChild(container) }
     const root = createRoot(container as unknown as Element)
     // Stable, as both hosts keep theirs: `FileSection` compares it by identity.
     const sideNames = { old: "base", new: "head" }
@@ -286,6 +290,8 @@ async function mount(
                 loadFile={options.loadFile ?? ((candidate) => Promise.resolve(candidate))}
                 fileSlots={nextSlots}
                 readImage={options.readImage}
+                imageReads={options.imageReads}
+                automaticReads={options.automaticReads}
                 zoomImage={options.zoomImage}
             />,
         )
@@ -302,9 +308,182 @@ async function mount(
         },
         async unmount() {
             await act(async () => root.unmount())
+            container.parentNode?.removeChild(container)
         },
     }
 }
+
+describe("PR automatic reads through the shared renderer", () => {
+    class NearObserver {
+        static all: NearObserver[] = []
+        nodes = new Set<Element>()
+        constructor(readonly callback: (entries: { target: Element; isIntersecting: boolean }[]) => void) { NearObserver.all.push(this) }
+        observe(node: Element) { this.nodes.add(node) }
+        unobserve(node: Element) { this.nodes.delete(node) }
+        disconnect() { this.nodes.clear() }
+        static enter() {
+            for (const observer of NearObserver.all) {
+                observer.callback([...observer.nodes].map(target => ({ target, isIntersecting: true })))
+            }
+        }
+    }
+    for (const images of [false, true]) {
+        for (const diffs of [false, true]) {
+            test(`independent preferences: images=${images}, diffs=${diffs}`, async () => {
+                const observer = g.IntersectionObserver
+                const bounds = Object.getOwnPropertyDescriptor(FakeElement.prototype, "getBoundingClientRect")!
+                FakeElement.prototype.getBoundingClientRect = () => ({ x: 0, y: 20, top: 20, left: 0, right: 100, bottom: 50, width: 100, height: 30 })
+                g.IntersectionObserver = NearObserver
+                ;(g.window as Record<string, unknown>).innerHeight = 800
+                NearObserver.all = []
+                const controller = new PrContentLoading()
+                controller.policy({ autoShowImages: images, autoLoadLargeDiffs: diffs }, true)
+                let texts = 0, pictures = 0
+                const files = [
+                    file({ content: { kind: "withheld" } }),
+                    file({ oldPath: "a.png", newPath: "a.png", content: { kind: "binary" } }),
+                    file({ oldPath: "huge.txt", newPath: "huge.txt", content: { kind: "tooLarge" } }),
+                ]
+                const view = await mount(files, undefined, {
+                    automaticReads: controller,
+                    loadFile: async candidate => { texts++; return { ...candidate, content: { kind: "hunks", hunks: [hunk()] } } },
+                    readImage: async () => { pictures++; return { old: { kind: "absent" }, new: { kind: "absent" } } },
+                })
+                try {
+                    await act(async () => NearObserver.enter())
+                    expect(texts).toBe(Number(diffs))
+                    expect(pictures).toBe(Number(images))
+                    controller.policy({ autoShowImages: false, autoLoadLargeDiffs: false }, true)
+                    controller.policy({ autoShowImages: images, autoLoadLargeDiffs: diffs }, true)
+                    await act(async () => NearObserver.enter())
+                    expect(texts).toBe(Number(diffs))
+                    expect(pictures).toBe(Number(images))
+                    if (diffs) { expect(view.container.textContent).toContain("const answer = 42") }
+                } finally {
+                    await view.unmount(); controller.dispose()
+                    g.IntersectionObserver = observer
+                    Object.defineProperty(FakeElement.prototype, "getBoundingClientRect", bounds)
+                }
+            })
+        }
+    }
+    function measuring() {
+        const observer = g.IntersectionObserver
+        const bounds = Object.getOwnPropertyDescriptor(FakeElement.prototype, "getBoundingClientRect")!
+        FakeElement.prototype.getBoundingClientRect = () => ({ x: 0, y: 20, top: 20, left: 0, right: 100, bottom: 50, width: 100, height: 30 })
+        g.IntersectionObserver = NearObserver
+        ;(g.window as Record<string, unknown>).innerHeight = 800
+        NearObserver.all = []
+        return () => {
+            g.IntersectionObserver = observer
+            Object.defineProperty(FakeElement.prototype, "getBoundingClientRect", bounds)
+        }
+    }
+
+    test("an automatically queued image keeps its manual control and shares its flight", async () => {
+        const restore = measuring()
+        const controller = new PrContentLoading()
+        controller.policy({ autoShowImages: true, autoLoadLargeDiffs: true }, true)
+        const finishText: (() => void)[] = []
+        let finishImage!: (value: ImageVersions) => void
+        let reads = 0
+        const files = [
+            file({ oldPath: "a.ts", newPath: "a.ts", content: { kind: "withheld" } }),
+            file({ oldPath: "b.ts", newPath: "b.ts", content: { kind: "withheld" } }),
+            file({ oldPath: "a.png", newPath: "a.png", content: { kind: "binary" } }),
+        ]
+        const view = await mount(files, undefined, {
+            automaticReads: controller, imageReads: "nearView",
+            loadFile: candidate => new Promise<DiffFile>(resolve => {
+                finishText.push(() => resolve({ ...candidate, content: { kind: "hunks", hunks: [hunk()] } }))
+            }),
+            readImage: () => { reads++; return new Promise<ImageVersions>(resolve => { finishImage = resolve }) },
+        })
+        try {
+            await act(async () => NearObserver.enter())
+            expect(finishText).toHaveLength(2)
+            expect(reads).toBe(0)
+            const manual = view.container.findAll("button").find(button => button.textContent === "Show image")
+            expect(manual).toBeDefined()
+            await press(manual!)
+            expect(reads).toBe(1)
+            await press(manual!)
+            expect(reads).toBe(1)
+            await act(async () => { for (const finish of finishText) { finish() } })
+            await act(async () => NearObserver.enter())
+            expect(reads).toBe(1)
+            await act(async () => finishImage({ old: { kind: "absent" }, new: { kind: "absent" } }))
+        } finally { await view.unmount(); controller.dispose(); restore() }
+    })
+
+    test("hidden and collapsed files wait; text results are classified before a subsequent image read", async () => {
+        const restore = measuring()
+        const controller = new PrContentLoading()
+        controller.policy({ autoShowImages: false, autoLoadLargeDiffs: true }, true)
+        let texts = 0, pictures = 0
+        const files = [file({ oldPath: "new.png", newPath: "new.png", content: { kind: "withheld" } })]
+        const options: MountOptions = {
+            visible: false, automaticReads: controller,
+            loadFile: async candidate => { texts++; return { ...candidate, content: { kind: "binary" } } },
+            readImage: async () => { pictures++; return { old: { kind: "absent" }, new: { kind: "absent" } } },
+        }
+        const view = await mount(files, undefined, options)
+        try {
+            await act(async () => NearObserver.enter())
+            expect(texts).toBe(0)
+            options.visible = true
+            await view.rerender(files, undefined)
+            await act(async () => { (reactProps(byClass(view.container, "diff-file-toggle")[0]).onClick as () => void)() })
+            await act(async () => NearObserver.enter())
+            expect(texts).toBe(0)
+            await act(async () => { (reactProps(byClass(view.container, "diff-file-toggle")[0]).onClick as () => void)() })
+            await act(async () => NearObserver.enter())
+            expect(texts).toBe(1)
+            expect(pictures).toBe(0)
+            controller.policy({ autoShowImages: true, autoLoadLargeDiffs: true }, true)
+            await act(async () => NearObserver.enter())
+            expect(pictures).toBe(1)
+        } finally { await view.unmount(); controller.dispose(); restore() }
+    })
+
+    for (const chosen of ["unified", "split"] as const) {
+        test(`automatic insertion preserves a live editor and old model results are ignored (${chosen})`, async () => {
+            layout = chosen
+            const restore = measuring()
+            const controller = new PrContentLoading()
+            controller.policy({ autoShowImages: true, autoLoadLargeDiffs: true }, true)
+            let answer!: (value: DiffFile) => void
+            let attempts = 0
+            const pending = file({ content: { kind: "withheld" } })
+            const stable = file({ oldPath: "draft.ts", newPath: "draft.ts" })
+            const files = [pending, stable]
+            const draft = <textarea defaultValue="unsent draft" />
+            const slots = (candidate: DiffFile) => candidate === stable ? { preamble: draft } : undefined
+            const view = await mount(files, slots, {
+                automaticReads: controller,
+                loadFile: () => { attempts++; return new Promise<DiffFile>(resolve => { answer = resolve }) },
+            })
+            try {
+                const editor = view.container.findAll("textarea")[0]
+                editor.focus()
+                await act(async () => NearObserver.enter())
+                expect(attempts).toBe(1)
+                expect(dom.document.activeElement).toBe(editor)
+                await act(async () => answer({ ...pending, content: { kind: "hunks", hunks: [hunk()] } }))
+                expect(view.container.findAll("textarea")[0]).toBe(editor)
+                expect(editor.value).toBe("unsent draft")
+                expect(dom.document.activeElement).toBe(editor)
+                const replacement = [file({ content: { kind: "withheld" } }), stable]
+                await view.rerender(replacement, slots)
+                await act(async () => NearObserver.enter())
+                expect(attempts).toBe(2)
+                await view.rerender([file({ content: { kind: "binary" } }), stable], slots)
+                await act(async () => answer({ ...pending, content: { kind: "hunks", hunks: [hunk()] } }))
+                expect(byClass(view.container, "diff-file")[0].textContent).not.toContain("const answer = 42")
+            } finally { await view.unmount(); controller.dispose(); restore() }
+        })
+    }
+})
 
 function lineSlots(container: FakeElement): FakeElement[] {
     return byClass(container, "diff-line-slot")

@@ -38,6 +38,10 @@ use crate::events::{
 };
 use crate::github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
 use crate::pull_request_cache::{FileAnswer, FileChanged, PullRequestDetails};
+use crate::pull_request_content_images::{
+    read_content_image, ContentImageFailure, ContentImageIo, ContentImageLimits,
+    LiveContentImageIo, PullRequestContentImageOutcome,
+};
 use crate::pull_request_detail::{
     listed_row, openable_link, CachedFile, ImageSide, ImageVersions, PullRequestDetail,
     PullRequestDetailOutcome, PullRequestFileOutcome, PullRequestImageOutcome,
@@ -52,7 +56,9 @@ use crate::review_action_store::{new_record_id, reference_key, ReviewActionStore
 use crate::review_actions;
 use crate::review_progress::{self, Lists, ReviewProgress, ReviewProgressStore, ReviewWrite};
 use crate::review_skip::{ReviewSkipPatterns, SkipPatternsOutcome, SkipRule};
-use crate::settings::{Appearance, SettingsLoad, SettingsStore};
+use crate::settings::{
+    Appearance, PrContentLoading, PrContentPreference, SettingsLoad, SettingsStore,
+};
 use openspec_core::config_file::preserve_corrupt_config;
 
 /// The GitHub submit event one frozen decision is sent as, and the event a
@@ -559,6 +565,11 @@ pub struct AppService {
     /// The pull-request viewer's detail cache, its reads in flight, and each
     /// provider's credential generation. See `pull_request_cache.rs`.
     pub(crate) pull_request_details: PullRequestDetails,
+    /// Independent public-image limits. Never replaced by preference/provider
+    /// toggles or credential changes, and shared by all clones/transports.
+    content_image_limits: ContentImageLimits,
+    /// Keep successful saves and their notices in the same order.
+    pr_content_updates: Arc<Mutex<()>>,
     /// `review-progress.json`, the files the reader marked viewed. See
     /// `review_progress.rs`.
     pub(crate) review_store: Arc<ReviewProgressStore>,
@@ -798,6 +809,8 @@ impl AppService {
             bitbucket_limits: BitbucketLimits::new(),
             github_limits: GithubLimits::new(),
             pull_request_details: PullRequestDetails::default(),
+            content_image_limits: ContentImageLimits::default(),
+            pr_content_updates: Arc::new(Mutex::new(())),
             review_store: Arc::new(ReviewProgressStore::open(review_progress_path)),
             action_store: Arc::new(ReviewActionStore::open(action_store_path)),
             notices: broadcast::channel(NOTICE_CHANNEL_CAPACITY).0,
@@ -4724,6 +4737,63 @@ impl AppService {
             .unwrap_or_else(|_| image_failure(ReadEnd::Transient, true))
     }
 
+    /// A credentialless read authorised only by current published content.
+    pub async fn pull_request_content_image(
+        &self,
+        reference: PullRequestReference,
+        body_digest: String,
+        source: String,
+    ) -> PullRequestContentImageOutcome {
+        self.pull_request_content_image_with(
+            reference,
+            body_digest,
+            source,
+            Arc::new(LiveContentImageIo),
+        )
+        .await
+    }
+
+    pub(crate) async fn pull_request_content_image_with(
+        &self,
+        reference: PullRequestReference,
+        body_digest: String,
+        source: String,
+        io: Arc<dyn ContentImageIo>,
+    ) -> PullRequestContentImageOutcome {
+        let svc = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let current = || {
+                svc.settings
+                    .pr_content_loading()
+                    .is_ok_and(|p| p.auto_show_images)
+                    && provider_enabled(&svc.settings, reference.provider)
+                    && listed_row(&reference, &svc.bitbucket.get(), &svc.github.get()).is_some()
+            };
+            let Some(authority) = svc.pull_request_details.content_image(
+                &reference.key(),
+                &body_digest,
+                &source,
+                &current,
+            ) else {
+                return PullRequestContentImageOutcome::Stale;
+            };
+            read_content_image(
+                &authority.source,
+                &svc.content_image_limits,
+                &|| {
+                    svc.pull_request_details
+                        .content_image_current(&authority, &current)
+                },
+                &*io,
+            )
+        })
+        .await
+        .unwrap_or(PullRequestContentImageOutcome::Failed {
+            reason: ContentImageFailure::Transient,
+            until_unix: None,
+        })
+    }
+
     /// Marks one file of a pull request viewed, or unmarks it — the service
     /// half of `set_file_viewed` on both transports (`pull-request-viewer`:
     /// *Review Progress*; design D9). `head` and `base` are the commits the
@@ -5031,6 +5101,33 @@ impl AppService {
         self.settings.set_appearance(appearance)?;
         self.notify(ServiceNotice::AppearanceChanged(appearance));
         Ok(())
+    }
+
+    pub async fn pr_content_loading(&self) -> Result<PrContentLoading, String> {
+        let settings = self.settings.clone();
+        tokio::task::spawn_blocking(move || settings.pr_content_loading())
+            .await
+            .map_err(|_| "PR loading preferences could not be read".to_string())?
+            .map_err(|_| "PR loading preferences could not be read".to_string())
+    }
+
+    pub async fn set_pr_content_loading(
+        &self,
+        preference: PrContentPreference,
+        enabled: bool,
+    ) -> Result<PrContentLoading, String> {
+        let svc = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ordered = svc.pr_content_updates.lock().unwrap();
+            let pair = svc
+                .settings
+                .set_pr_content_loading(preference, enabled)
+                .map_err(|_| "PR loading preferences could not be saved".to_string())?;
+            svc.notify(ServiceNotice::PrContentLoadingChanged(pair));
+            Ok(pair)
+        })
+        .await
+        .map_err(|_| "PR loading preferences could not be saved".to_string())?
     }
 
     /// Announces a provider's enabled flag as just set, to every window and
@@ -10403,6 +10500,295 @@ mod tests {
         match outcome {
             PullRequestDetailOutcome::Detail { detail } => *detail,
             other => panic!("expected a detail, got {other:?}"),
+        }
+    }
+
+    mod content_images {
+        use super::*;
+        use crate::pull_request_cache::{ReadDetail, RowSignature};
+        use crate::pull_request_content_images::{body_digest, ContentImageReply, PinnedTarget};
+        use openspec_core::pr_content_image::ImageSource;
+        use std::net::SocketAddr;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const BODY: &str = "![screen](https://images.example/a.png?sig=secret)";
+        const SOURCE: &str = "https://images.example/a.png?sig=secret";
+
+        fn cache(svc: &AppService, reference: &PullRequestReference, body: &str) {
+            let row = listed_pull_request(reference.provider, "acme/api", 42);
+            let detail = PullRequestDetail {
+                reference: reference.clone(),
+                row: row.clone(),
+                head_branch: "feature".into(),
+                base_branch: "main".into(),
+                head_commit: "head".into(),
+                base_commit: "base".into(),
+                author: None,
+                description: body.into(),
+                conversation: vec![],
+                checks: vec![],
+                threads: vec![],
+                files: vec![],
+                unlisted_files: 0,
+                read_at_unix: READ_AT,
+                no_longer_listed: false,
+            };
+            assert!(svc.pull_request_details.store(
+                ReadDetail {
+                    key: reference.key(),
+                    detail,
+                    files: vec![],
+                    signature: RowSignature::of(&row),
+                    generation: svc.pull_request_details.generation(reference.provider),
+                    manual_at: None,
+                    reused: false,
+                    merge_base: None,
+                    links: None,
+                    credential_fingerprint: crate::credential_store::GithubCredential::new(
+                        "fixture".into(),
+                        crate::credential_store::CredentialSource::Environment,
+                    )
+                    .context()
+                    .fingerprint(),
+                },
+                || true
+            ));
+        }
+
+        struct ImageIo {
+            _deadline: crate::pull_request_content_images::test_support::ReadDeadline,
+            calls: AtomicUsize,
+            after_dns: Box<dyn Fn() + Send + Sync>,
+            after_get: Box<dyn Fn() + Send + Sync>,
+            status: u16,
+        }
+
+        impl Default for ImageIo {
+            fn default() -> Self {
+                Self {
+                    _deadline: crate::pull_request_content_images::test_support::ReadDeadline::new(
+                    ),
+                    calls: AtomicUsize::new(0),
+                    after_dns: Box::new(|| {}),
+                    after_get: Box::new(|| {}),
+                    status: 200,
+                }
+            }
+        }
+
+        impl ContentImageIo for ImageIo {
+            fn unix_time(&self) -> u64 {
+                READ_AT
+            }
+            fn resolve(
+                &self,
+                _: &ImageSource,
+                _: Duration,
+            ) -> Result<Vec<SocketAddr>, ContentImageFailure> {
+                (self.after_dns)();
+                Ok(vec!["1.1.1.1:443".parse().unwrap()])
+            }
+            fn get(
+                &self,
+                _: &PinnedTarget,
+                _: Duration,
+            ) -> Result<ContentImageReply, ContentImageFailure> {
+                self.calls.fetch_add(1, Ordering::AcqRel);
+                (self.after_get)();
+                Ok(ContentImageReply {
+                    status: self.status,
+                    location: None,
+                    retry_after: None,
+                    body: Box::new(std::io::Cursor::new(
+                        include_bytes!(
+                            "../../openspec-core/tests/fixtures/images/three-by-two.png"
+                        )
+                        .to_vec(),
+                    )),
+                })
+            }
+        }
+
+        async fn image(
+            svc: &AppService,
+            reference: &PullRequestReference,
+            io: Arc<ImageIo>,
+        ) -> PullRequestContentImageOutcome {
+            svc.pull_request_content_image_with(
+                reference.clone(),
+                body_digest(BODY),
+                SOURCE.into(),
+                io,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn content_image_preferences_notify_only_after_success_and_reconcile_disk() {
+            let cfg = tempfile::tempdir().unwrap();
+            let svc = AppService::bootstrap(cfg.path().into());
+            let mut notices = svc.subscribe_notices();
+            assert_eq!(
+                svc.pr_content_loading().await.unwrap(),
+                PrContentLoading::default()
+            );
+            let pair = svc
+                .set_pr_content_loading(PrContentPreference::AutoShowImages, true)
+                .await
+                .unwrap();
+            assert_eq!(
+                heard(&mut notices),
+                [ServiceNotice::PrContentLoadingChanged(pair)]
+            );
+            let stale = AppService::bootstrap(cfg.path().into());
+            let both = stale
+                .set_pr_content_loading(PrContentPreference::AutoLoadLargeDiffs, true)
+                .await
+                .unwrap();
+            assert!(both.auto_show_images && both.auto_load_large_diffs);
+            assert_eq!(svc.pr_content_loading().await.unwrap(), both);
+            std::fs::write(cfg.path().join("settings.json"), b"damaged now").unwrap();
+            assert!(svc
+                .set_pr_content_loading(PrContentPreference::AutoShowImages, false)
+                .await
+                .is_err());
+            assert!(heard(&mut notices).is_empty());
+            assert_eq!(svc.settings.snapshot().pr_content_loading, both);
+        }
+
+        #[tokio::test]
+        async fn content_image_service_requires_current_preferences_list_provider_and_body() {
+            for provider in [Github, Bitbucket] {
+                let (_cfg, svc, _) = serving(
+                    provider,
+                    vec![listed_pull_request(provider, "acme/api", 42)],
+                );
+                let reference = pull_request(provider, "acme", "api", 42);
+                cache(&svc, &reference, BODY);
+                let io = Arc::new(ImageIo::default());
+                assert_eq!(
+                    image(&svc, &reference, io.clone()).await,
+                    PullRequestContentImageOutcome::Stale
+                );
+                svc.set_pr_content_loading(PrContentPreference::AutoShowImages, true)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    image(&svc, &reference, io.clone()).await,
+                    PullRequestContentImageOutcome::Image { .. }
+                ));
+                cache(&svc, &reference, "only an ordinary link");
+                assert_eq!(
+                    image(&svc, &reference, io.clone()).await,
+                    PullRequestContentImageOutcome::Stale
+                );
+                cache(&svc, &reference, BODY);
+                list(&svc, provider, vec![]);
+                assert_eq!(
+                    image(&svc, &reference, io.clone()).await,
+                    PullRequestContentImageOutcome::Stale
+                );
+                list(
+                    &svc,
+                    provider,
+                    vec![listed_pull_request(provider, "acme/api", 42)],
+                );
+                match provider {
+                    Github => svc.set_github_enabled(false).unwrap(),
+                    Bitbucket => svc.set_bitbucket_enabled(false).unwrap(),
+                }
+                assert_eq!(
+                    image(&svc, &reference, io.clone()).await,
+                    PullRequestContentImageOutcome::Stale
+                );
+                assert_eq!(io.calls.load(Ordering::Acquire), 1);
+            }
+        }
+
+        #[tokio::test]
+        async fn content_image_service_rechecks_revocation_after_dns_and_late_bytes() {
+            for boundary in ["dns", "bytes"] {
+                for revoke in ["setting", "provider", "generation", "body", "list"] {
+                    let (_cfg, svc, _, reference) = serving_acme();
+                    svc.set_pr_content_loading(PrContentPreference::AutoShowImages, true)
+                        .await
+                        .unwrap();
+                    cache(&svc, &reference, BODY);
+                    let service = svc.clone();
+                    let pr = reference.clone();
+                    let action = Box::new(move || match revoke {
+                        "setting" => {
+                            service
+                                .settings
+                                .set_pr_content_loading(PrContentPreference::AutoShowImages, false)
+                                .unwrap();
+                        }
+                        "provider" => service.set_github_enabled(false).unwrap(),
+                        "generation" => service.pull_request_details.forget(Github),
+                        "body" => cache(&service, &pr, "edited comment"),
+                        "list" => list(&service, Github, vec![]),
+                        _ => unreachable!(),
+                    });
+                    let mut io = ImageIo::default();
+                    if boundary == "dns" {
+                        io.after_dns = action;
+                    } else {
+                        io.after_get = action;
+                    }
+                    let io = Arc::new(io);
+                    assert_eq!(
+                        image(&svc, &reference, io.clone()).await,
+                        PullRequestContentImageOutcome::Stale,
+                        "{boundary}/{revoke}"
+                    );
+                    assert_eq!(
+                        io.calls.load(Ordering::Acquire),
+                        usize::from(boundary == "bytes")
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn content_image_service_toggles_do_not_reset_cooldowns_or_provider_limits() {
+            let (_cfg, svc, _, reference) = serving_acme();
+            svc.set_pr_content_loading(PrContentPreference::AutoShowImages, true)
+                .await
+                .unwrap();
+            cache(&svc, &reference, BODY);
+            let io = Arc::new(ImageIo {
+                status: 429,
+                ..ImageIo::default()
+            });
+            let outcome = image(&svc, &reference, io.clone()).await;
+            assert_eq!(
+                outcome,
+                PullRequestContentImageOutcome::Failed {
+                    reason: ContentImageFailure::Deferred,
+                    until_unix: Some(READ_AT + 60),
+                }
+            );
+            let limits = (
+                svc.github_limits.deadlines(),
+                svc.bitbucket_limits.deadlines(),
+            );
+            for enabled in [false, true] {
+                svc.set_pr_content_loading(PrContentPreference::AutoShowImages, enabled)
+                    .await
+                    .unwrap();
+                svc.set_github_enabled(enabled).unwrap();
+            }
+            svc.set_github_token(String::new()).unwrap();
+            cache(&svc, &reference, BODY);
+            assert_eq!(image(&svc, &reference, io.clone()).await, outcome);
+            assert_eq!(io.calls.load(Ordering::Acquire), 1);
+            assert_eq!(
+                (
+                    svc.github_limits.deadlines(),
+                    svc.bitbucket_limits.deadlines()
+                ),
+                limits
+            );
         }
     }
 

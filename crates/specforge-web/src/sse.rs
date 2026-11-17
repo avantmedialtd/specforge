@@ -550,6 +550,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stored_pr_content_loading_reaches_every_stream_without_content() {
+        let (state, _dir) = test_state();
+        let mut first = Sse::new(event_stream(&state)).into_response().into_body();
+        let mut second = Sse::new(event_stream(&state)).into_response().into_body();
+        state
+            .svc
+            .set_pr_content_loading(openspec_app::PrContentPreference::AutoShowImages, true)
+            .await
+            .unwrap();
+        let expected = (
+            "pr-content-loading-changed".to_string(),
+            json!({"autoShowImages":true,"autoLoadLargeDiffs":false}),
+        );
+        assert_eq!(next_frame(&mut first).await, expected);
+        assert_eq!(next_frame(&mut second).await, expected);
+    }
+
     /// `pull-request-actions`: *Review Action State Synchronises Only Native
     /// Windows* — *Served tabs receive no action event*; `web-ui`: *Event
     /// Transport Reproduces the Frontend Event Contract* — *Review-action

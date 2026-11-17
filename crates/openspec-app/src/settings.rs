@@ -146,6 +146,39 @@ pub struct AppSettings {
     /// not be accepted with is left out of matching and kept in the file.
     #[serde(default)]
     pub review_skip_patterns: Vec<String>,
+    /// Opt-in PR previews. A tolerant block keeps a malformed preference from
+    /// invalidating unrelated identity, credential and review configuration.
+    #[serde(default)]
+    pub pr_content_loading: PrContentLoading,
+}
+
+/// The two application-wide automatic PR loading preferences. Neither a stale
+/// first-paint mirror nor an unknown stored value may enable network reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrContentLoading {
+    pub auto_show_images: bool,
+    pub auto_load_large_diffs: bool,
+}
+
+impl<'de> Deserialize<'de> for PrContentLoading {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let enabled = |name: &str| value.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(Self {
+            auto_show_images: enabled("autoShowImages"),
+            auto_load_large_diffs: enabled("autoLoadLargeDiffs"),
+        })
+    }
+}
+
+/// A setter changes one field under the transaction, never replacing the pair
+/// a stale client read before another client changed its neighbour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PrContentPreference {
+    AutoShowImages,
+    AutoLoadLargeDiffs,
 }
 
 /// The reading width of the markdown content column, as a rung on a fixed
@@ -736,6 +769,7 @@ impl Default for AppSettings {
             bitbucket: BitbucketConfig::default(),
             github: GithubConfig::default(),
             review_skip_patterns: Vec::new(),
+            pr_content_loading: PrContentLoading::default(),
         }
     }
 }
@@ -1064,6 +1098,35 @@ impl SettingsStore {
     pub fn set_appearance(&self, value: Appearance) -> io::Result<()> {
         self.update(|settings| {
             settings.appearance = value;
+        })
+    }
+
+    /// Authoritative on every explicit read, including a read by another
+    /// service sharing the file. Called off the async worker. Only this
+    /// non-secret preference pair is reconciled into memory here.
+    pub fn pr_content_loading(&self) -> io::Result<PrContentLoading> {
+        let _write = self.write.lock().unwrap();
+        let _file = self.file_lock.lock()?;
+        let preferences = self.read_current()?.pr_content_loading;
+        self.settings.lock().unwrap().pr_content_loading = preferences;
+        Ok(preferences)
+    }
+
+    pub fn set_pr_content_loading(
+        &self,
+        preference: PrContentPreference,
+        enabled: bool,
+    ) -> io::Result<PrContentLoading> {
+        self.update(|settings| {
+            match preference {
+                PrContentPreference::AutoShowImages => {
+                    settings.pr_content_loading.auto_show_images = enabled;
+                }
+                PrContentPreference::AutoLoadLargeDiffs => {
+                    settings.pr_content_loading.auto_load_large_diffs = enabled;
+                }
+            }
+            settings.pr_content_loading
         })
     }
 
@@ -1923,6 +1986,133 @@ mod tests {
     /// Generous: a correct build answers at once, so this bound is only ever
     /// reached by a broken one, which then fails rather than hangs.
     const GENEROUS: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn pr_content_loading_defaults_are_individually_tolerant() {
+        for (block, expected) in [
+            ("null", (false, false)),
+            ("true", (false, false)),
+            ("[]", (false, false)),
+            ("{}", (false, false)),
+            (r#"{"autoShowImages":true}"#, (true, false)),
+            (r#"{"autoLoadLargeDiffs":true}"#, (false, true)),
+            (
+                r#"{"autoShowImages":"true","autoLoadLargeDiffs":true}"#,
+                (false, true),
+            ),
+            (
+                r#"{"autoShowImages":true,"autoLoadLargeDiffs":1}"#,
+                (true, false),
+            ),
+        ] {
+            let settings: AppSettings = serde_json::from_value(serde_json::json!({
+                "prContentLoading": serde_json::from_str::<serde_json::Value>(block).unwrap(),
+                "notificationsEnabled": false,
+                "reviewSkipPatterns": ["vendor/**"],
+                "identity": { "displayName": "Reviewer", "aliases": [] }
+            }))
+            .unwrap();
+            assert_eq!(
+                settings.pr_content_loading,
+                PrContentLoading {
+                    auto_show_images: expected.0,
+                    auto_load_large_diffs: expected.1,
+                },
+                "{block}"
+            );
+            assert!(!settings.notifications_enabled);
+            assert_eq!(settings.review_skip_patterns, ["vendor/**"]);
+        }
+        let legacy: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.pr_content_loading, PrContentLoading::default());
+        assert_eq!(
+            AppSettings::default().pr_content_loading,
+            PrContentLoading::default()
+        );
+    }
+
+    #[test]
+    fn pr_content_loading_survives_restart_and_keeps_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store.set_notifications_enabled(false).unwrap();
+        assert_eq!(
+            store.pr_content_loading().unwrap(),
+            PrContentLoading::default()
+        );
+        let chosen = store
+            .set_pr_content_loading(PrContentPreference::AutoShowImages, true)
+            .unwrap();
+        assert!(chosen.auto_show_images);
+        assert!(!chosen.auto_load_large_diffs);
+        let reloaded = SettingsStore::load(path);
+        assert_eq!(reloaded.pr_content_loading().unwrap(), chosen);
+        assert!(!reloaded.snapshot().notifications_enabled);
+    }
+
+    #[test]
+    fn pr_content_loading_stale_clients_update_only_the_named_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let first = SettingsStore::load(path.clone());
+        let stale = SettingsStore::load(path);
+        first
+            .set_pr_content_loading(PrContentPreference::AutoShowImages, true)
+            .unwrap();
+        let both = stale
+            .set_pr_content_loading(PrContentPreference::AutoLoadLargeDiffs, true)
+            .unwrap();
+        assert!(both.auto_show_images && both.auto_load_large_diffs);
+        assert_eq!(first.pr_content_loading().unwrap(), both);
+        first
+            .set_pr_content_loading(PrContentPreference::AutoShowImages, false)
+            .unwrap();
+        let remaining = stale.pr_content_loading().unwrap();
+        assert!(!remaining.auto_show_images && remaining.auto_load_large_diffs);
+        stale
+            .set_pr_content_loading(PrContentPreference::AutoLoadLargeDiffs, false)
+            .unwrap();
+        assert_eq!(
+            first.pr_content_loading().unwrap(),
+            PrContentLoading::default()
+        );
+    }
+
+    #[test]
+    fn pr_content_loading_failed_save_keeps_disk_and_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store
+            .set_pr_content_loading(PrContentPreference::AutoShowImages, true)
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+        let stored = store.snapshot().pr_content_loading;
+        fail_save_after(&store, 0);
+        assert!(store
+            .set_pr_content_loading(PrContentPreference::AutoLoadLargeDiffs, true)
+            .is_err());
+        assert_eq!(store.snapshot().pr_content_loading, stored);
+        assert_eq!(store.pr_content_loading().unwrap(), stored);
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn pr_content_loading_unreadable_current_preferences_cannot_enable_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store
+            .set_pr_content_loading(PrContentPreference::AutoShowImages, true)
+            .unwrap();
+        fs::write(&path, b"newly damaged").unwrap();
+        assert!(store.pr_content_loading().is_err());
+        assert!(store
+            .set_pr_content_loading(PrContentPreference::AutoShowImages, false)
+            .is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"newly damaged");
+    }
 
     /// The defaults a reader window opens at when nothing has been stored.
     /// Values, not just "some number": a reader that opened at 1×1 or off-screen

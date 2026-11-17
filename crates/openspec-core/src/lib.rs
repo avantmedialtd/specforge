@@ -18,6 +18,7 @@ pub mod identity;
 pub mod image;
 pub mod parser;
 pub mod paths;
+pub mod pr_content_image;
 pub mod presentation;
 pub mod registry;
 pub mod repo_cache;

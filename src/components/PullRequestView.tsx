@@ -88,6 +88,8 @@ import {
 import { bodyBytes, MAX_BODY_BYTES } from "../reviewActions"
 import { createSlotCache, lineSlotLookup, type LineSlotEntry } from "../slotCache"
 import { shareStructure } from "../structuralShare"
+import { sha256Hex } from "../sha256"
+import { prProgressReconciler } from "../prContentLoading"
 import { encodeAddress } from "../routing/codec"
 import type { PullRequestResolution } from "../routing/resolve"
 import type {
@@ -143,6 +145,9 @@ import { PullRequestMarkers, PullRequestSignalCells, reviewCellTitle, checksLabe
 import { PullRequestDiscussion, type ThreadFilter } from "./PullRequestDiscussion"
 import { PullRequestReviewSheet } from "./PullRequestReviewSheet"
 import { RelativeTime } from "./RelativeTime"
+import {
+    PullRequestLoadingProvider, PullRequestLoadingScope, usePullRequestLoading,
+} from "./PullRequestLoadingContext"
 
 /// What only the center pane offers, which the pull-request window does not:
 /// the pop-out control, the linked change as a way to it, and a link to
@@ -265,6 +270,11 @@ export function PullRequestView({
     )
     const { read, reading, refresh, fileRefused, submitted } = usePullRequestRead(reference, row)
     const { detail, notice } = read
+    const publishedBodies = useMemo(() => new Set(detail ? [
+        detail.description,
+        ...detail.conversation.filter(entry => !entry.comment.deleted).map(entry => entry.comment.body),
+        ...detail.threads.flatMap(thread => thread.comments.filter(comment => !comment.deleted).map(comment => comment.body)),
+    ].map(sha256Hex) : []), [detail])
     const [progress, reloadProgress] = useReviewProgress(reference, detail)
     // One action state for this pull request's presentations: the center pane
     // and the detached window render this component, and its composer reads
@@ -562,6 +572,7 @@ export function PullRequestView({
                             </p>
                     )}
                     {jumpNotice && <p className="pull-request-view-banner" role="status">{jumpNotice}</p>}
+                    <PullRequestLoadingScope visible={workspace.tab === "overview"}>
                     <div id="pr-panel-overview" role="tabpanel" aria-labelledby="pr-tab-overview"
                         hidden={workspace.tab !== "overview"} className="pull-request-view-body">
                         <section className="pull-request-view-section">
@@ -597,6 +608,8 @@ export function PullRequestView({
                                 </details>}
                             </section>
                     </div>
+                    </PullRequestLoadingScope>
+                    <PullRequestLoadingScope visible={workspace.tab === "discussion"}>
                     <div id="pr-panel-discussion" role="tabpanel" aria-labelledby="pr-tab-discussion"
                         hidden={workspace.tab !== "discussion"} className="pull-request-view-body">
                         <PullRequestDiscussion threads={detail.threads} filter={threadFilter}
@@ -614,6 +627,8 @@ export function PullRequestView({
                         </section>
                         </PullRequestDiscussion>
                     </div>
+                    </PullRequestLoadingScope>
+                    <PullRequestLoadingScope visible={workspace.tab === "files"}>
                     <div id="pr-panel-files" role="tabpanel" aria-labelledby="pr-tab-files"
                         hidden={workspace.tab !== "files"}>
                     <div className="pr-files-actions">
@@ -634,12 +649,14 @@ export function PullRequestView({
                         onJumpFinished={jumpFinished}
                     />}
                     </div>
+                    </PullRequestLoadingScope>
                 </>
             )}
         </div>
     )
 
     return (
+        <PullRequestLoadingProvider bodies={publishedBodies}>
         <PullRequestActionsContext.Provider value={actions}>
             {isTauri() ? (
                 <ReviewDraftEditorProvider reference={reference} actions={actions}>
@@ -649,6 +666,7 @@ export function PullRequestView({
                 view
             )}
         </PullRequestActionsContext.Provider>
+        </PullRequestLoadingProvider>
     )
 }
 
@@ -1133,6 +1151,20 @@ export function PullRequestFiles({
     onJumpFinished?: (found: boolean) => void
 }) {
     const { headCommit: head, baseCommit: base } = detail
+    const loading = usePullRequestLoading()
+    const currentModel = useRef(detail.files)
+    currentModel.current = detail.files
+    const staleModels = useRef(new WeakSet<DiffFile[]>())
+    const refused = useCallback(() => {
+        if (currentModel.current !== detail.files || staleModels.current.has(detail.files)) { return }
+        staleModels.current.add(detail.files)
+        onFileRefused()
+    }, [detail.files, onFileRefused])
+    const reconciler = useMemo(() => prProgressReconciler(reloadProgress), [reloadProgress])
+    useEffect(() => {
+        reconciler.activate()
+        return () => reconciler.dispose()
+    }, [reconciler])
     const sideNames = useMemo(
         () => ({ old: detail.baseBranch, new: detail.headBranch }),
         [detail.baseBranch, detail.headBranch],
@@ -1153,10 +1185,10 @@ export function PullRequestFiles({
                 (outcome) => {
                     switch (outcome.kind) {
                         case "file":
-                            void reloadProgress()
+                            reconciler.request()
                             return outcome.file
                         case "changed":
-                            onFileRefused()
+                            refused()
                             throw FILE_CHANGED_TEXT
                         case "failed":
                             throw fileFailureText(
@@ -1170,7 +1202,7 @@ export function PullRequestFiles({
                     throw errorText(err)
                 },
             ),
-        [reference, head, base, onFileRefused, reloadProgress],
+        [reference, head, base, refused, reconciler],
     )
 
     // The image files that link to their diff on the host once read: a
@@ -1208,7 +1240,7 @@ export function PullRequestFiles({
                         case "images":
                             return { old: outcome.old, new: outcome.new }
                         case "changed":
-                            onFileRefused()
+                            refused()
                             throw FILE_CHANGED_TEXT
                         case "failed":
                             throw fileFailureText(
@@ -1222,7 +1254,7 @@ export function PullRequestFiles({
                     throw errorText(err)
                 },
             ),
-        [reference, head, base, onFileRefused, linkToHost],
+        [reference, head, base, refused, linkToHost],
     )
 
     // Zoom opens the file's versions in a window of their own, which reads
@@ -1410,7 +1442,9 @@ export function PullRequestFiles({
                     loadFile={loadFile}
                     fileSlots={fileSlots}
                     readImage={readImage}
-                    imageReads="onRequest"
+                    imageReads={loading?.preferences?.autoShowImages ? "nearView" : "onRequest"}
+                    automaticReads={loading?.controller}
+                    automaticReady={currentProgress !== null}
                     onImageUndrawable={linkToHost}
                     zoomImage={zoomImage}
                     ref={diffRef}
@@ -1782,7 +1816,7 @@ function DraftItemCard({
                     onCancel={() => setEditing(false)}
                 />
             ) : (
-                <MarkdownView content={item.body} pullRequest={reference} />
+                <MarkdownView content={item.body} pullRequest={reference} pullRequestPublished={false} />
             )}
             {!editing && editor.editable && (
                 <div className="pull-request-view-draft-actions">

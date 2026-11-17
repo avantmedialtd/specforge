@@ -27,11 +27,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use openspec_core::diff::REQUESTED_FILE_BYTES_LIMIT;
+use openspec_core::pr_content_image::{canonical_source, image_sources};
 use openspec_core::{DiffContent, DiffFile};
 use tokio::sync::watch;
 
 use crate::credential_store::CredentialFingerprint;
 use crate::events::PullRequestProvider;
+use crate::pull_request_content_images::{
+    published_bodies, ContentImageAuthority, PublishedBodies,
+};
 use crate::pull_request_detail::{
     file_path, CachedFile, FetchPaths, Fetched, PullRequestDetail, PullRequestDetailOutcome,
     PullRequestKey, ReadLinks, ReusedFiles,
@@ -104,6 +108,8 @@ pub(crate) struct CachedDetail {
     /// Stable fingerprint of the credential that read this detail. Private to
     /// the service; it is never copied into [`PullRequestDetail`].
     credential_fingerprint: CredentialFingerprint,
+    /// Source authority for embedded images, indexed outside the cache lock.
+    published_bodies: PublishedBodies,
 }
 
 /// A file of the cached detail, as `get_pull_request_file` asks for it.
@@ -440,6 +446,7 @@ impl PullRequestDetails {
     /// and a listed read stores its own with no merge base. Returns whether
     /// it was stored.
     pub(crate) fn store(&self, read: ReadDetail, enabled: impl Fn() -> bool) -> bool {
+        let published_bodies = published_bodies(&read.detail);
         let mut cache = self.lock();
         if !enabled() || cache.generation(read.key.provider) != read.generation {
             return false;
@@ -473,9 +480,60 @@ impl PullRequestDetails {
             merge_base,
             links: read.links,
             credential_fingerprint: read.credential_fingerprint,
+            published_bodies,
         };
         cache.insert(read.key, entry);
         true
+    }
+
+    /// Authorise one parsed source from the exact published body. `current`
+    /// checks the preference, provider and listed row; expensive parsing and
+    /// hashing never happen while the cache mutex is held.
+    pub(crate) fn content_image(
+        &self,
+        key: &PullRequestKey,
+        body_digest: &str,
+        source: &str,
+        current: &dyn Fn() -> bool,
+    ) -> Option<ContentImageAuthority> {
+        if !current() {
+            return None;
+        }
+        let source = canonical_source(source)?;
+        let (generation, body) = {
+            let mut cache = self.lock();
+            let generation = cache.generation(key.provider);
+            let body = cache.touch(key)?.published_bodies.get(body_digest)?.clone();
+            (generation, body)
+        };
+        if !image_sources(&body).contains(&source) {
+            return None;
+        }
+        let authority = ContentImageAuthority {
+            key: key.clone(),
+            generation,
+            body_digest: body_digest.to_owned(),
+            source,
+        };
+        self.content_image_current(&authority, current)
+            .then_some(authority)
+    }
+
+    /// Rechecked before every request/redirect and before returning bytes, so
+    /// an edited comment is stale even when the commits did not change.
+    pub(crate) fn content_image_current(
+        &self,
+        authority: &ContentImageAuthority,
+        current: &dyn Fn() -> bool,
+    ) -> bool {
+        if !current() {
+            return false;
+        }
+        let cache = self.lock();
+        cache.generation(authority.key.provider) == authority.generation
+            && cache
+                .get(&authority.key)
+                .is_some_and(|entry| entry.published_bodies.contains_key(&authority.body_digest))
     }
 
     /// One file of the cached detail of `key`, as a withheld file's load asks
@@ -861,6 +919,185 @@ mod tests {
             assert!(details.store(read, || true));
         }
         details
+    }
+
+    #[test]
+    fn content_image_authority_requires_the_current_body_and_parsed_source() {
+        use crate::pull_request_content_images::body_digest;
+        let pr = github(42);
+        let body = "![screen](https://images.example/a.png?sig=secret#preview)";
+        let mut read = read(&pr, NOW);
+        read.detail.description = body.to_owned();
+        let details = holding([read]);
+        let digest = body_digest(body);
+        let source = "https://images.example/a.png?sig=secret";
+        let authority = details
+            .content_image(&pr, &digest, source, &|| true)
+            .unwrap();
+        assert_eq!(authority.source.as_str(), source);
+        assert!(details.content_image_current(&authority, &|| true));
+        assert!(!details.content_image_current(&authority, &|| false));
+        assert!(details
+            .content_image(&pr, &digest, source, &|| false)
+            .is_none());
+        assert!(details
+            .content_image(&pr, &body_digest("other"), source, &|| true)
+            .is_none());
+        assert!(details
+            .content_image(&github(43), &digest, source, &|| true)
+            .is_none());
+        assert!(details
+            .content_image(&pr, &digest, "https://images.example/other", &|| true)
+            .is_none());
+        let checks = std::cell::Cell::new(0);
+        assert!(details
+            .content_image(&pr, &digest, source, &|| {
+                checks.set(checks.get() + 1);
+                checks.get() == 1
+            })
+            .is_none());
+        assert_eq!(checks.get(), 2, "authority is checked again after parsing");
+    }
+
+    #[test]
+    fn content_image_text_code_and_html_do_not_authorise_a_url() {
+        use crate::pull_request_content_images::body_digest;
+        let pr = github(42);
+        let source = "https://images.example/a.png";
+        for body in [
+            format!("Only text: {source}"),
+            format!("[ordinary]({source})"),
+            format!("`![code]({source})`"),
+            format!("<!-- ![comment]({source}) -->"),
+            format!("<img src=\"{source}\">"),
+        ] {
+            let mut read = read(&pr, NOW);
+            read.detail.description = body.clone();
+            let details = holding([read]);
+            assert!(details
+                .content_image(&pr, &body_digest(&body), source, &|| true)
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn content_image_edited_body_invalidates_without_a_commit_change() {
+        use crate::pull_request_content_images::body_digest;
+        let pr = github(42);
+        let body = "![screen](https://images.example/a.png)";
+        let mut original = read(&pr, NOW);
+        original.detail.description = body.into();
+        let details = holding([original]);
+        let authority = details
+            .content_image(
+                &pr,
+                &body_digest(body),
+                "https://images.example/a.png",
+                &|| true,
+            )
+            .unwrap();
+        let mut unchanged = read(&pr, NOW + 1);
+        unchanged.detail.description = body.into();
+        assert!(details.store(unchanged, || true));
+        assert!(details.content_image_current(&authority, &|| true));
+        assert!(details.store(read(&pr, NOW + 2), || true));
+        assert!(!details.content_image_current(&authority, &|| true));
+    }
+
+    #[test]
+    fn content_image_provider_generation_and_eviction_revoke_authority() {
+        use crate::pull_request_content_images::body_digest;
+        let pr = github(42);
+        let body = "![screen](https://images.example/a.png)";
+        let mut original = read(&pr, NOW);
+        original.detail.description = body.into();
+        let details = holding([original]);
+        let authority = details
+            .content_image(
+                &pr,
+                &body_digest(body),
+                "https://images.example/a.png",
+                &|| true,
+            )
+            .unwrap();
+        details.forget(PullRequestProvider::Bitbucket);
+        assert!(details.content_image_current(&authority, &|| true));
+        details.forget(PullRequestProvider::Github);
+        assert!(!details.content_image_current(&authority, &|| true));
+        let mut replacement = read(&pr, NOW + 1);
+        replacement.generation = details.generation(pr.provider);
+        replacement.detail.description = body.into();
+        assert!(details.store(replacement, || true));
+        assert!(!details.content_image_current(&authority, &|| true));
+        let current = details
+            .content_image(
+                &pr,
+                &body_digest(body),
+                "https://images.example/a.png",
+                &|| true,
+            )
+            .unwrap();
+        details.invalidate(&pr);
+        assert!(!details.content_image_current(&current, &|| true));
+    }
+
+    #[test]
+    fn content_image_only_published_non_deleted_comment_bodies_are_indexed() {
+        use crate::pull_request_content_images::body_digest;
+        use crate::pull_request_detail::{
+            ConversationEntry, DiffSide, PullRequestComment, ReviewThread,
+        };
+        let comment = |body: &str, deleted| PullRequestComment {
+            id: body.to_owned(),
+            author: None,
+            body: body.to_owned(),
+            posted_at_unix: NOW,
+            url: None,
+            minimized_reason: None,
+            deleted,
+        };
+        let pr = github(42);
+        let source = "https://images.example/a.png";
+        let general = format!("general ![screen]({source})");
+        let inline = format!("inline ![screen]({source})");
+        let deleted = format!("deleted ![screen]({source})");
+        let mut original = read(&pr, NOW);
+        original.detail.conversation = vec![
+            ConversationEntry {
+                review: None,
+                comment: comment(&general, false),
+            },
+            ConversationEntry {
+                review: None,
+                comment: comment(&deleted, true),
+            },
+        ];
+        original.detail.threads = vec![ReviewThread {
+            id: "thread".into(),
+            path: "a.rs".into(),
+            side: DiffSide::New,
+            line: Some(1),
+            start_side: None,
+            start_line: None,
+            original_line: None,
+            original_start_line: None,
+            resolved: false,
+            outdated: false,
+            replyable: true,
+            comments: vec![comment(&inline, false)],
+        }];
+        let details = holding([original]);
+        for body in [&general, &inline] {
+            assert!(details
+                .content_image(&pr, &body_digest(body), source, &|| true)
+                .is_some());
+        }
+        assert!(details
+            .content_image(&pr, &body_digest(&deleted), source, &|| true)
+            .is_none());
+        assert!(details
+            .content_image(&pr, &body_digest("unsaved draft"), source, &|| true)
+            .is_none());
     }
 
     fn is_cached(details: &PullRequestDetails, key: &PullRequestKey) -> bool {

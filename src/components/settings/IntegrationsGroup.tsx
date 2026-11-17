@@ -47,6 +47,8 @@ import {
     type ProviderConfigState,
 } from "./useProviderConfig"
 import { useSettingSwitch } from "./useSettingSwitch"
+import { Switch } from "./Switch"
+import { usePrContentLoading } from "../../hooks/usePrContentLoading"
 
 /// Where a BitBucket API token is created.
 const BITBUCKET_TOKEN_URL = "https://id.atlassian.com/manage-profile/security/api-tokens"
@@ -106,7 +108,7 @@ export function IntegrationsGroup({ onSelectGroup, desktop }: IntegrationsGroupP
                     provider={bitbucket}
                     desktop={desktop}
                 />
-                {anyOn && <SkipPatternsRow />}
+                {anyOn && <><PrContentLoadingRows /><SkipPatternsRow /></>}
             </section>
             <section className="settings-section">
                 <h3 className="settings-subheading">Usage</h3>
@@ -127,6 +129,32 @@ export function IntegrationsGroup({ onSelectGroup, desktop }: IntegrationsGroupP
             </section>
         </>
     )
+}
+
+function PrContentLoadingRows() {
+    const { preferences, error, saving, saveErrors, choose } = usePrContentLoading()
+    return <>
+        <SettingsRow
+            title="Automatically show images"
+            controlId="settings-auto-show-images"
+            description="Show changed-image comparisons and supported images in PR descriptions and comments as you scroll. Embedded image hosts can learn when an image is read and the IP address of the machine running SpecForge. Embedded images are fetched without credentials; protected or unsupported images stay links. Changed-file previews use the configured provider API."
+            error={saveErrors.autoShowImages ?? error}
+            control={<Switch id="settings-auto-show-images"
+                checked={preferences?.autoShowImages ?? false}
+                disabled={!preferences || saving.autoShowImages}
+                onChange={enabled => { void choose("autoShowImages", enabled) }} />}
+        />
+        <SettingsRow
+            title="Automatically load large diffs"
+            controlId="settings-auto-load-large-diffs"
+            description="Load withheld file diffs as you scroll. Some loads use the provider API. Preview limits and rate limits still apply."
+            error={saveErrors.autoLoadLargeDiffs ?? error}
+            control={<Switch id="settings-auto-load-large-diffs"
+                checked={preferences?.autoLoadLargeDiffs ?? false}
+                disabled={!preferences || saving.autoLoadLargeDiffs}
+                onChange={enabled => { void choose("autoLoadLargeDiffs", enabled) }} />}
+        />
+    </>
 }
 
 /// An enabled pull-request card's slot line: where its panel is, and the way

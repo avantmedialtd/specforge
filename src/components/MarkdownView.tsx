@@ -36,6 +36,8 @@ import {
     textOf,
 } from "../pullRequestMarkdown"
 import type { PullRequestReference } from "../types"
+import { sha256Hex } from "../sha256"
+import { PublishedPrImageBody } from "./PullRequestLoadingContext"
 
 // rehype-highlight runs before our component overrides do. Left alone it
 // would shred a ```mermaid fence into hljs token spans before the source
@@ -514,6 +516,8 @@ export function markdownComponents(overrides: Partial<Components> | null): Reado
 }
 
 interface MarkdownViewProps {
+    /// Local draft previews never authorise embedded reads.
+    pullRequestPublished?: boolean
     content: string
     containerRef?: RefObject<HTMLDivElement | null>
     /// Called after each render with the document's headings, in document
@@ -609,6 +613,7 @@ function MarkdownViewImpl({
     root,
     basePath,
     pullRequest,
+    pullRequestPublished = true,
     onHeadings,
     onFragment,
 }: MarkdownViewProps & MarkdownSource) {
@@ -664,6 +669,9 @@ function MarkdownViewImpl({
     const ready = mathReady(content, mathFailed)
     const lastRenderedRef = useRef<string | null>(null)
     const shown = ready ? content : lastRenderedRef.current
+    const publishedBody = useMemo(() => pullRequest && pullRequestPublished && shown !== null
+        ? { reference: pullRequest, digest: sha256Hex(shown) } : null,
+    [pullRequest, pullRequestPublished, shown])
     useLayoutEffect(() => {
         if (shown !== null) { lastRenderedRef.current = shown }
     }, [shown])
@@ -749,6 +757,7 @@ function MarkdownViewImpl({
 
     return (
         <div ref={containerRef} className="markdown-view">
+            <PublishedPrImageBody.Provider value={publishedBody}>
             <MarkdownLinkContext.Provider value={links}>
                 <ReactMarkdown
                     remarkPlugins={[
@@ -771,6 +780,7 @@ function MarkdownViewImpl({
                     {shown ?? ""}
                 </ReactMarkdown>
             </MarkdownLinkContext.Provider>
+            </PublishedPrImageBody.Provider>
             <LinkFailureToast ref={toastRef} />
         </div>
     )

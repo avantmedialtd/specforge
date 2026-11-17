@@ -138,11 +138,13 @@ The pull-request view SHALL render the pull request's changed files through the 
 | `refused` | the provider is switched off |
 | `transient` | the provider did not answer, and to try again |
 
-**Image files.** The view SHALL be a host whose image reader reads on request (see the *Image Comparison* and *Diff View Hosts* requirements in the `diff-view` capability).
-- **Showing an image.** An image file that is not a Git LFS pointer SHALL show "Show image" in place of its state row. Activating it SHALL read the file's versions through `get_pull_request_file_image` (see *Pull-Request Image Reads*).
-- **`changed`.** It SHALL make the view read the pull request again.
-- **`failed`.** It SHALL leave "Show image" in place with its reason beside it, in the words of the table above. The reason `redirected`, which only an image read gives, reads that the provider sent the file from somewhere SpecForge does not follow. A failed read SHALL NOT make the view read again.
-- **Keeping a read.** The view SHALL keep a read's versions until it renders another detail.
+With **Automatically load large diffs** on, eligible near-viewport withheld files SHALL load through the same reader, following the *Automatic Loads Follow Visible Content* and *Automatic Preview Loads Preserve Review State* requirements in the `pr-content-loading` capability. With it off, loading SHALL remain manual. No automatic load SHALL target a too-large or binary non-image file, raise a hard ceiling, expand a collapsed section or remove its manual retry.
+
+**Image files.** The view SHALL select its image-reader timing from **Automatically show images** (see the *Pull-Request Loading Preferences* requirement in the `pr-content-loading` capability), using the *Image Comparison* and *Diff View Hosts* requirements in the `diff-view` capability.
+- **Showing an image.** With the preference off, an image file that is not a Git LFS pointer SHALL show "Show image" in place of its state row. Activating it SHALL read the file's versions through `get_pull_request_file_image` (see *Pull-Request Image Reads*). With the preference on, an eligible expanded image section SHALL read through that same command as it nears the viewport, under the shared automatic-work queue.
+- **`changed`.** It SHALL make the view read the pull request again. Several stale automatic outcomes for one old model SHALL cause at most one refresh for that model.
+- **`failed`.** It SHALL leave the manual image control in place with its reason beside it, in the words of the table above: "Show image" for manual mode and "Try again" for automatic mode. The reason `redirected`, which only an image read gives, reads that the provider sent the file from somewhere SpecForge does not follow. A failed read SHALL NOT make the view read again or automatically retry itself.
+- **Keeping a read.** The view SHALL keep a read's versions for the file model they belong to; layout, tab, collapse and preference changes and a detail reread that retains that model SHALL not reread them. A replacement model SHALL discard its obsolete reads.
 - **Review progress.** An image file SHALL keep its viewed mark as a whole file: it has no hunk marks, and a read of its versions brings no hunks, so the view does not read the progress again after one.
 
 **Too-large files.** A file too large to preview SHALL carry, in its preamble slot, a link to that file's diff on its provider's page. On GitHub the link SHALL be the pull request's page followed by `/files#diff-` and the lowercase hexadecimal SHA-256 digest of the file's path. On BitBucket it SHALL be the pull request's page followed by `/diff#chg-` and the path. The path SHALL be the file's new path, or its old path when it was deleted. The link SHALL be built from the provider page the detail carries, and SHALL open as the view's other provider links do: an opener-isolated tab in the browser skin, and the desktop link opener in the desktop application (see *Desktop Link Opener*). An image file SHALL carry the same link when any of these holds:
@@ -172,7 +174,7 @@ The view SHALL apply hunk states only to the detail whose head and base commits 
 
 **Completing a file.** When a mark the reader made in this view is stored, through a file's box or a hunk's checkbox or end row, and the progress read that follows shows that file viewed, the view SHALL ask the diff view to collapse that file's section once (see the *File Sections* requirement in the `diff-view` capability). A mark arriving from another window or tab, a progress read for any other reason, and opening the pull request SHALL collapse nothing.
 
-**After a load.** When a load brings a file's hunks, the view SHALL read the pull request's review progress again.
+**After a load.** When a load brings a file's hunks, the view SHALL read the pull request's review progress again. Concurrent automatic loads SHALL coalesce progress reconciliation without losing a final read after all newly discovered hunks are known.
 
 #### Scenario: Pull requests read in the layout commit detail uses
 
@@ -310,13 +312,13 @@ The view SHALL apply hunk states only to the detail whose head and base commits 
 
 #### Scenario: An image file shows its versions on request
 
-- **WHEN** a GitHub pull request modifies `icons/app.png` and the reader activates its "Show image"
+- **WHEN** the PR image preference is off and a GitHub pull request modifies `icons/app.png` and the reader activates its "Show image"
 - **THEN** the view reads its versions through `get_pull_request_file_image` and shows them as the `diff-view` capability's *Image Comparison* requirement says
 - **AND** collapsing and expanding its section reads nothing again
 
 #### Scenario: A failed image read can be tried again
 
-- **WHEN** the reader activates "Show image" while GitHub's REST deadline holds until 14:05
+- **WHEN** the PR image preference is off and the reader activates "Show image" while GitHub's REST deadline holds until 14:05
 - **THEN** no request is sent, "Show image" stays, and the view says GitHub's rate limit holds until 14:05
 - **AND** the view does not read the pull request again
 
@@ -362,6 +364,18 @@ The view SHALL apply hunk states only to the detail whose head and base commits 
 
 - **WHEN** the reader expands a skipped file's section and collapses it again
 - **THEN** nothing is stored and the file is still skipped
+
+#### Scenario: Enabled image automation uses the existing pinned reader
+
+- **WHEN** the image preference is on and an expanded changed-image section nears the visible Files viewport
+- **THEN** the shared queue reads it with the rendered commits through `get_pull_request_file_image`
+- **AND** a failure leaves an explicit retry without another automatic attempt
+
+#### Scenario: Enabled diff automation reconciles new hunks
+
+- **WHEN** the large-diff preference is on and eligible withheld files load automatically
+- **THEN** their original counts and all editor identities remain intact
+- **AND** progress is reconciled for the final discovered hunk set without a read storm
 
 ### Requirement: Linked Change in the Pull-Request View
 
@@ -674,11 +688,11 @@ Geometry SHALL NOT be remembered per pull request: pull-request windows SHALL be
 
 The pull-request window SHALL hold only the permissions it uses, and SHALL add two backstops to the untrusted-content handling every window applies (see *Pull-Request Content Is Untrusted*): a narrow capability and a content-security policy.
 
-**Capability.** In the desktop application, one capability SHALL match the `pull-request-*` windows. Its plugin permissions SHALL be exactly `core:event:allow-listen`, `core:event:allow-unlisten` and `core:window:allow-close`; it SHALL grant no dialog, autostart, notification, menu or tray plugin permission. The main, reader and image capabilities SHALL NOT match a pull-request window. Its application-command permissions SHALL include only the pull-request reads, local review-progress operations, checked link/window operations and review-action operations the window uses (see the *Application Commands Are Granted Per Window Kind* requirement in the `pull-request-actions` capability). It SHALL include no workspace/settings mutation and no main-, reader- or image-only command. The window SHALL save its size through its permitted application command and have its title set from the Rust side, so it needs no other window permission.
+**Capability.** In the desktop application, one capability SHALL match the `pull-request-*` windows. Its plugin permissions SHALL be exactly `core:event:allow-listen`, `core:event:allow-unlisten` and `core:window:allow-close`; it SHALL grant no dialog, autostart, notification, menu or tray plugin permission. The main, reader and image capabilities SHALL NOT match a pull-request window. Its application-command permissions SHALL include only the pull-request reads, local review-progress operations, checked link/window operations and review-action operations the window uses (see the *Application Commands Are Granted Per Window Kind* requirement in the `pull-request-actions` capability), plus the read-only `get_pr_content_loading` and checked `get_pull_request_content_image` commands. It SHALL NOT grant `set_pr_content_loading`, workspace/settings mutation or main-, reader- or image-only commands. The window SHALL save its size through its permitted application command and have its title set from the Rust side, so it needs no other window permission.
 
 **Navigation guard.** The window SHALL install the same navigation guard as the main and reader windows: only the application's own origin, and in a development build its development server, SHALL load in it, so a link the webview activates itself never loads another page in the window.
 
-**Content-security policy.** On both hosts, before the window renders anything, its page's `head` SHALL carry a content-security policy of `img-src 'self' data: blob:; font-src 'self' data:; media-src 'none'; object-src 'none'`, in place before any fetch it governs starts. The policy SHALL be installed only for a pull-request window, never for the main window or a reader window.
+**Content-security policy.** On both hosts, before the window renders anything, its page's `head` SHALL carry a content-security policy of `img-src 'self' data: blob:; font-src 'self' data:; media-src 'none'; object-src 'none'`, in place before any fetch it governs starts. The policy SHALL be installed only for a pull-request window, never for the main window or a reader window. Enabling automatic images SHALL NOT broaden this policy: accepted embedded previews SHALL render from checked service bytes and object URLs, not remote DOM image URLs.
 
 #### Scenario: The capability grants only what the window uses
 
@@ -716,6 +730,17 @@ The pull-request window SHALL hold only the permissions it uses, and SHALL add t
 
 - **WHEN** an element requesting an image from a remote host appears in a pull-request window's page
 - **THEN** the image is not fetched
+
+#### Scenario: PR windows read preferences but cannot change them
+
+- **WHEN** a detached PR window invokes the loading getter and then the loading setter
+- **THEN** the getter is permitted and the setter is refused before its handler runs
+
+#### Scenario: Checked previews need no wider CSP
+
+- **WHEN** automatic images are enabled in a detached PR window
+- **THEN** a supported embedded image can render from the checked read's object URL
+- **AND** remote DOM image requests remain blocked
 
 ### Requirement: Provider Enabled Flags Stay Current
 
@@ -1493,21 +1518,21 @@ Descriptions and comments are written by others, and SHALL render through the sh
 - **Mermaid fences** SHALL render as their source, as plain unhighlighted text, and SHALL NOT be drawn, since a diagram can fetch remote images while it is laid out.
 - **Maths** SHALL render as it does in artifacts, under the same non-trusting posture (see the *Mathematical Notation Rendering* requirement in the `spec-browser` capability).
 - **`svg` fences** SHALL keep their inert image rendering (see the *SVG Fence Rendering* requirement in the `spec-browser` capability).
-- **Remote images** SHALL NOT be loaded. A standalone image SHALL render as a labelled link showing its alt text and its host. An image inside a link SHALL render as its alt text and host only, as part of the enclosing link, with no link or handler of its own, so one activation opens one destination.
-- **Links** SHALL follow *Desktop Link Opener*: in the desktop application they open only through its command, and in the browser skin in a new opener-isolated tab.
+- **Embedded images** SHALL remain unloaded by default. A standalone unloaded image SHALL render as a labelled link showing its alt text and host. An unloaded image inside a link SHALL render as its alt text and host only, as part of the enclosing link, with no link or handler of its own, so one activation opens one destination. Only when **Automatically show images** is enabled SHALL supported published Markdown images become eligible for the checked credentialless read and in-memory preview defined by the *Embedded Image Reads Are Authorised by Published Content* and *Embedded Previews Preserve Untrusted-Content Boundaries* requirements in the `pr-content-loading` capability. Unsupported/blocked sources SHALL retain their safe fallback; author-controlled URLs SHALL never become DOM image-fetch URLs.
+- **Links** SHALL follow *Desktop Link Opener*: in the desktop application they open only through its command, and in the browser skin in a new opener-isolated tab. A preview inside a link SHALL preserve that single destination.
 - **Identifiers** SHALL NOT be taken from the content. No element rendered from it SHALL carry an `id` derived from its text, heading identifiers included, so content cannot collide with, or be styled as, the application's own elements.
 
 **Hidden characters.** The pull request's title and branch names in the view's header SHALL render each character that renders as nothing as a visible, marked escape, with the escapes and the exemptions the `diff-view` capability gives text outside changed lines (see the *Hidden Characters Are Shown* requirement in the `diff-view` capability).
 
 **DNS prefetching** SHALL be off in every SpecForge page, the main window, reader windows and pull-request windows on both hosts, so no host is resolved merely because a link to it is displayed.
 
-**Changed image files** are not content of this mode, and no URL SHALL ever load them. An image file's versions SHALL be read only by an image read from the provider's API (see *Pull-Request Image Reads*). They SHALL be checked as the *Image Comparison* requirement in the `diff-view` capability says, and rendered from memory, which the pull-request window's content-security policy already allows (see *Pull-Request Window Permissions*). A remote image in a description or comment SHALL stay a labelled link, whatever the pull request's changed files hold.
+**Changed image files** are not content of this mode, and no URL SHALL ever load them. An image file's versions SHALL be read only by an image read from the provider's API (see *Pull-Request Image Reads*). They SHALL be checked as the *Image Comparison* requirement in the `diff-view` capability says, and rendered from memory, which the pull-request window's content-security policy already allows (see *Pull-Request Window Permissions*). Embedded-image reads SHALL remain a separate credentialless operation; they SHALL neither reuse provider authentication nor change how changed-file versions are read.
 
 #### Scenario: Raw HTML stays unrendered
 
 - **WHEN** a description contains `<img src="https://tracker.example/p.gif">`
 - **THEN** no image element is created from it
-- **AND** no request is made to `tracker.example`
+- **AND** no request is made to `tracker.example`, even with automatic images on
 
 #### Scenario: A heading takes no identifier from the content
 
@@ -1534,13 +1559,13 @@ Descriptions and comments are written by others, and SHALL render through the sh
 
 #### Scenario: A standalone image becomes a labelled link
 
-- **WHEN** a description contains `![screenshot](https://img.example/s.png)`
+- **WHEN** automatic images are off and a description contains `![screenshot](https://img.example/s.png)`
 - **THEN** it renders as a link labelled "screenshot" that shows the host `img.example`
 - **AND** no request is made to `img.example`
 
 #### Scenario: An image inside a link becomes part of that link
 
-- **WHEN** a description contains `[![build](https://badge.example/b.svg)](https://ci.example/run/7)`
+- **WHEN** automatic images are off and a description contains `[![build](https://badge.example/b.svg)](https://ci.example/run/7)`
 - **THEN** it renders one link to `https://ci.example/run/7` that shows "build" and `badge.example`
 - **AND** activating it opens only `https://ci.example/run/7`
 - **AND** no request is made to `badge.example`
@@ -1557,7 +1582,7 @@ Descriptions and comments are written by others, and SHALL render through the sh
 
 #### Scenario: The main window is guarded by the mode alone
 
-- **WHEN** the center pane renders a description containing a remote image, a `mermaid` fence and raw HTML
+- **WHEN** automatic images are off and the center pane renders a description containing a remote image, a `mermaid` fence and raw HTML
 - **THEN** none of them causes a request, although no content-security policy governs what the main window loads
 
 #### Scenario: No page prefetches DNS
@@ -1567,9 +1592,15 @@ Descriptions and comments are written by others, and SHALL render through the sh
 
 #### Scenario: A changed image renders without a request of its own
 
-- **WHEN** a pull-request window shows the versions of a changed `icons/app.png`, and the description embeds `![app](https://img.example/app.png)`
+- **WHEN** automatic images are off and a pull-request window shows the versions of a changed `icons/app.png`, and the description embeds `![app](https://img.example/app.png)`
 - **THEN** the versions render from bytes the image read returned, and the only requests made for them went to the provider's API
 - **AND** the description's image still renders as a labelled link, and no request is made to `img.example`
+
+#### Scenario: Opted-in Markdown images use only the checked read
+
+- **WHEN** automatic images are on and an eligible supported image appears in a current published description or comment
+- **THEN** it can preview only after the service authorises its source and validates its bytes
+- **AND** raw HTML, Mermaid, identifiers, external links and workspace Markdown retain their existing policies
 
 ### Requirement: Desktop Link Opener
 

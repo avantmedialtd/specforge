@@ -97,10 +97,14 @@ import {
 import { escapeLine, escapeText, hunksWarn, sourceOffsetIn, type Segment } from "../hiddenChars"
 import { reuseMap } from "../slotCache"
 import { useDiffHorizontalScroll } from "../hooks/useDiffHorizontalScroll"
+import { contentIsVisible, keepContentPlace, observeContent, type PrContentLoading } from "../prContentLoading"
 import type { DiffContent, DiffFile, Hunk, ImageVersions, Line, LineKind } from "../types"
 
 export interface DiffViewProps {
     visible?: boolean
+    /// PR-only mixed scheduling. Other hosts retain their own read timing.
+    automaticReads?: PrContentLoading
+    automaticReady?: boolean
     navigation?: DiffNavigation
     /// The model, in the order its sections and navigator rows are shown.
     files: DiffFile[]
@@ -276,6 +280,8 @@ export function DiffView({
     fileSlots,
     readImage,
     imageReads = "onRequest",
+    automaticReads,
+    automaticReady = true,
     onImageUndrawable,
     zoomImage,
     ref,
@@ -333,6 +339,15 @@ export function DiffView({
     // The reader's place, taken as a switch begins and restored once the new
     // layout has rendered, before it paints.
     const placeRef = useRef<Place | null>(null)
+    const asyncRestoreRef = useRef<(() => void) | null>(null)
+    const mounted = useRef(true)
+    const flights = useRef(new WeakMap<DiffFile[], Map<string, Promise<void>>>())
+    const autoLatest = useRef({ visible, collapsed, loads, images, automaticReads, automaticReady })
+    autoLatest.current = { visible, collapsed, loads, images, automaticReads, automaticReady }
+    useEffect(() => {
+        mounted.current = true
+        return () => { mounted.current = false }
+    }, [])
     // The scroll position that restoring the place set, for the navigator,
     // which tells it from a reader's scroll.
     const restoredTopRef = useRef<number | null>(null)
@@ -407,6 +422,11 @@ export function DiffView({
     // it, and after every commit, since the new layout may land a render
     // later.
     useLayoutEffect(() => {
+        if (asyncRestoreRef.current) {
+            asyncRestoreRef.current()
+            asyncRestoreRef.current = null
+            placeRef.current = null
+        }
         const place = placeRef.current
         if (!visible || place === null || inEffect !== decidedRef.current) { return }
         placeRef.current = null
@@ -433,10 +453,20 @@ export function DiffView({
         })
     }, [])
 
-    const load = useCallback((file: DiffFile) => {
+    const load = useCallback((file: DiffFile): Promise<void> => {
         const key = fileKey(file)
         const requestedFor = filesRef.current
-        const settle = (next: FileLoad) =>
+        let running = flights.current.get(requestedFor)
+        if (!running) { flights.current.set(requestedFor, running = new Map()) }
+        const pending = running.get(`diff:${key}`)
+        if (pending) { return pending }
+        const settle = (next: FileLoad) => {
+            if (!mounted.current || filesRef.current !== requestedFor) { return }
+            if (next.status === "loaded" && autoLatest.current.automaticReads) {
+                const section = sectionOf(sectionsRef.current, key)
+                if (section) { asyncRestoreRef.current ??= keepContentPlace(section, true) }
+                placeRef.current ??= recordPlace(sectionsRef.current)
+            }
             setLoadState((previous) => {
                 // A read that lands after the host passed new files is
                 // dropped with the content it would have replaced.
@@ -445,11 +475,14 @@ export function DiffView({
                 byKey.set(key, next)
                 return { files: requestedFor, byKey }
             })
+        }
         settle({ status: "loading" })
-        loadFileRef.current(file).then(
+        const promise = Promise.resolve().then(() => loadFileRef.current(file)).then(
             (loaded) => settle({ status: "loaded", content: loaded.content }),
             (error: unknown) => settle({ status: "failed", message: String(error) }),
-        )
+        ).finally(() => running.delete(`diff:${key}`))
+        running.set(`diff:${key}`, promise)
+        return promise
     }, [])
 
     // ---- Image reads ----------------------------------------------------
@@ -462,18 +495,31 @@ export function DiffView({
         if (!reader) { return Promise.resolve() }
         const key = fileKey(file)
         const requestedFor = filesRef.current
-        const settle = (next: ImageRead) =>
+        let running = flights.current.get(requestedFor)
+        if (!running) { flights.current.set(requestedFor, running = new Map()) }
+        const pending = running.get(`image:${key}`)
+        if (pending) { return pending }
+        const settle = (next: ImageRead) => {
+            if (!mounted.current || filesRef.current !== requestedFor) { return }
+            if (next.status === "read" && autoLatest.current.automaticReads) {
+                const section = sectionOf(sectionsRef.current, key)
+                if (section) { asyncRestoreRef.current ??= keepContentPlace(section, true) }
+                placeRef.current ??= recordPlace(sectionsRef.current)
+            }
             setImageState((previous) => {
                 if (filesRef.current !== requestedFor) { return previous }
                 const byKey = new Map(previous.files === requestedFor ? previous.byKey : [])
                 byKey.set(key, next)
                 return { files: requestedFor, byKey }
             })
+        }
         settle({ status: "loading" })
-        return reader(file).then(
+        const promise = Promise.resolve().then(() => reader(file)).then(
             (versions) => settle({ status: "read", versions: decodeVersions(versions) }),
             (error: unknown) => settle({ status: "failed", message: String(error) }),
-        )
+        ).finally(() => running.delete(`image:${key}`))
+        running.set(`image:${key}`, promise)
+        return promise
     }, [])
 
     // The near-view queue of the files array it reads for: a new array
@@ -482,6 +528,7 @@ export function DiffView({
     const queueFor = useCallback((): NearViewQueue => {
         const current = filesRef.current
         if (queueRef.current?.files !== current) {
+            queueRef.current?.queue.dispose()
             const queue = new NearViewQueue((key) => {
                 const file = current.find((candidate) => fileKey(candidate) === key)
                 return file ? readImageFile(file) : Promise.resolve()
@@ -496,6 +543,7 @@ export function DiffView({
     const observerRef = useRef<IntersectionObserver | null>(null)
     const observeImage = useCallback(
         (element: HTMLElement): (() => void) => {
+            if (autoLatest.current.automaticReads) { return () => {} }
             const key = element.dataset.imagePlaceholder
             if (key === undefined) { return () => {} }
             let observer = observerRef.current
@@ -525,16 +573,43 @@ export function DiffView({
         },
         [queueFor],
     )
-    useEffect(() => () => observerRef.current?.disconnect(), [])
+    useEffect(() => () => {
+        observerRef.current?.disconnect()
+        queueRef.current?.queue.dispose()
+    }, [])
+
+    useEffect(() => {
+        if (!automaticReads || !sectionsRef.current) { return }
+        const generation = automaticReads.modelKey(files)
+        const cleanups: (() => void)[] = []
+        for (const node of sectionsRef.current.querySelectorAll<HTMLElement>("[data-file-key]")) {
+            const key = node.dataset.fileKey
+            const file = files.find(f => fileKey(f) === key)
+            if (!file || key === undefined) { continue }
+            const loaded = loads.get(key)
+            const content = loaded?.status === "loaded" ? loaded.content : file.content
+            const image = readImageRef.current && isImageFile({ ...file, content })
+            const kind = content.kind === "withheld" ? "diff" : image ? "image" : null
+            if (!kind || content.kind === "tooLarge" || isLfsPointerFile({ ...file, content })) { continue }
+            if ((kind === "diff" && loaded) || (kind === "image" && images.has(key))) { continue }
+            const work = automaticReads.watch(`${generation}:${kind}:${key}`, kind,
+                () => kind === "diff" ? load(file) : readImageFile(file),
+                () => filesRef.current === files && autoLatest.current.visible && autoLatest.current.automaticReady
+                    && !autoLatest.current.collapsed.has(key) && contentIsVisible(node))
+            const off = observeContent(node, work.near)
+            cleanups.push(() => { off(); work.dispose() })
+        }
+        return () => { for (const off of cleanups) { off() } }
+    }, [automaticReads, files, loads, images, collapsed, visible, automaticReady, inEffect, load, readImageFile])
 
     /// Reads an image file as its host says: "Show image" reads it at once,
     /// and "Try again" near the view reads it next in the queue.
     const requestImage = useCallback(
         (file: DiffFile) => {
-            if (imageReads === "nearView") { queueFor().retry(fileKey(file)) }
+            if (imageReads === "nearView" && !automaticReads) { queueFor().retry(fileKey(file)) }
             else { void readImageFile(file) }
         },
-        [imageReads, queueFor, readImageFile],
+        [imageReads, automaticReads, queueFor, readImageFile],
     )
 
     const chooseMode = useCallback((key: string, mode: ImageMode) => {
@@ -545,6 +620,7 @@ export function DiffView({
             return { files: chosenFor, byKey }
         })
     }, [])
+    const requestLoad = useCallback((file: DiffFile) => { void load(file) }, [load])
 
     const reportUndrawable = useCallback((file: DiffFile) => {
         onUndrawableRef.current?.(file)
@@ -870,7 +946,7 @@ export function DiffView({
                                     collapsed={collapsed.has(key)}
                                     layout={inEffect}
                                     onToggle={toggle}
-                                    onLoad={load}
+                                    onLoad={requestLoad}
                                     headerExtra={allSlots.get(key)?.headerExtra}
                                     preamble={allSlots.get(key)?.preamble}
                                     slots={slotsByKey.get(key)}
@@ -879,6 +955,7 @@ export function DiffView({
                                     shown={shown.get(key)}
                                     onShow={show}
                                     imageReads={readImage ? imageReads : undefined}
+                                    manualImageRequest={automaticReads !== undefined}
                                     imageRead={images.get(key)}
                                     imageMode={modes.get(key) ?? "both"}
                                     sideNames={sideNames}
@@ -1743,6 +1820,8 @@ interface FileSectionProps {
     onShow: (key: string, index: number, shown: boolean) => void
     /// When the host reads image files; undefined when it reads none.
     imageReads: ImageReads | undefined
+    /// A PR keeps immediate access even while automatic work is waiting.
+    manualImageRequest: boolean
     /// This file's read of its versions, if any.
     imageRead: ImageRead | undefined
     imageMode: ImageMode
@@ -1794,6 +1873,7 @@ const FileSection = memo(function FileSection({
     shown,
     onShow,
     imageReads,
+    manualImageRequest,
     imageRead,
     imageMode,
     sideNames,
@@ -1880,6 +1960,7 @@ const FileSection = memo(function FileSection({
                             file={file}
                             content={content}
                             reads={imageReads}
+                            manualRequest={manualImageRequest}
                             read={imageRead}
                             mode={imageMode}
                             layout={layout}
@@ -2056,6 +2137,7 @@ interface ImageBodyProps {
     file: DiffFile
     content: DiffContent
     reads: ImageReads
+    manualRequest: boolean
     read: ImageRead | undefined
     mode: ImageMode
     layout: DiffLayout
@@ -2076,6 +2158,7 @@ function ImageBody({
     file,
     content,
     reads,
+    manualRequest,
     read,
     mode,
     layout,
@@ -2121,7 +2204,7 @@ function ImageBody({
         )
     }
     const loading = read?.status === "loading"
-    const control = reads === "onRequest" ? "Show image" : "Try again"
+    const control = reads === "nearView" && read?.status === "failed" ? "Try again" : "Show image"
     return (
         <div
             className="diff-state-row diff-image-placeholder"
@@ -2130,8 +2213,8 @@ function ImageBody({
             aria-busy={loading || undefined}
             ref={reads === "nearView" ? watch : undefined}
         >
-            {reads === "nearView" && read?.status !== "failed" && <span>Loading image…</span>}
-            {(reads === "onRequest" || read?.status === "failed") && (
+            {reads === "nearView" && !manualRequest && read?.status !== "failed" && <span>Loading image…</span>}
+            {(reads === "onRequest" || manualRequest || read?.status === "failed") && (
                 // `aria-disabled` rather than `disabled`, which would drop a
                 // keyboard reader's focus.
                 <button

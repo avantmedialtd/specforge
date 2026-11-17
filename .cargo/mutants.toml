@@ -162,6 +162,13 @@ exclude_re = [
     "service\\.rs.*replace step_position -> usize with 0",
     "replace match guard !operation\\.phase\\.is_terminal\\(\\) with true in AppService::accept_review_confirmation",
     "replace match guard current\\.phase\\.is_terminal\\(\\) with false in AppService::finish_bitbucket_submission",
+
+    # pr_content_image.rs: the three Options bits are disjoint. OR and XOR
+    # produce the identical bitset, so these two operator replacements cannot
+    # change any parser event. AND mutants remain in scope; each selected GFM
+    # flag is asserted directly, and the shared corpus includes a pipe that
+    # changes image recognition without GFM tables.
+    "pr_content_image\\.rs.*replace \\| with \\^ in image_markdown_options",
 ]
 
 # ------------------------------------------------------------ build and test

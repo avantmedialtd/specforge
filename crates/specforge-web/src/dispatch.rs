@@ -377,6 +377,18 @@ pub async fn dispatch(
                     .await,
             )?
         }
+        "get_pr_content_loading" => to_val(svc.pr_content_loading().await?)?,
+        "set_pr_content_loading" => {
+            let a: PrContentLoadingArg = parse(args)?;
+            to_val(svc.set_pr_content_loading(a.preference, a.enabled).await?)?
+        }
+        "get_pull_request_content_image" => {
+            let a: ContentImageArg = parse(args)?;
+            to_val(
+                svc.pull_request_content_image(a.reference, a.body_digest, a.source)
+                    .await,
+            )?
+        }
         // They read `review-progress.json` afresh, and a mark or an inclusion
         // syncs its write, so they run on the blocking pool rather than on the
         // runtime.
@@ -681,6 +693,21 @@ struct AppearanceArg {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PrContentLoadingArg {
+    preference: openspec_app::PrContentPreference,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentImageArg {
+    reference: PullRequestReference,
+    body_digest: String,
+    source: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PanelPositionArg {
     position: PanelPosition,
 }
@@ -895,6 +922,76 @@ mod tests {
             "the getter reads back what was stored"
         );
         assert!(notices.try_recv().is_err(), "and a read announces nothing");
+    }
+
+    #[tokio::test]
+    async fn pr_content_loading_commands_share_service_authority_and_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = AppService::bootstrap(dir.path().into());
+        let (tx, mut extra) = broadcast::channel(16);
+        let mut notices = svc.subscribe_notices();
+        assert_eq!(
+            dispatch(&svc, &tx, "get_pr_content_loading", json!({}))
+                .await
+                .unwrap(),
+            json!({"autoShowImages": false, "autoLoadLargeDiffs": false})
+        );
+        let pair = dispatch(
+            &svc,
+            &tx,
+            "set_pr_content_loading",
+            json!({"preference": "autoShowImages", "enabled": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            pair,
+            json!({"autoShowImages": true, "autoLoadLargeDiffs": false})
+        );
+        let notice = notices.try_recv().unwrap();
+        assert_eq!(
+            openspec_app::notice_envelope(&notice),
+            ("pr-content-loading-changed", pair.clone())
+        );
+        assert!(extra.try_recv().is_err(), "only the service broadcasts");
+        assert_eq!(
+            dispatch(&svc, &tx, "get_pr_content_loading", json!({}))
+                .await
+                .unwrap(),
+            pair
+        );
+        assert!(dispatch(
+            &svc,
+            &tx,
+            "set_pr_content_loading",
+            json!({"preference": "invalid", "enabled": true})
+        )
+        .await
+        .is_err());
+        assert!(notices.try_recv().is_err());
+        let outcome = dispatch(
+            &svc,
+            &tx,
+            "get_pull_request_content_image",
+            json!({
+                "reference": {"provider":"github","owner":"acme","repo":"api","number":42},
+                "bodyDigest":"caller-only", "source":"https://images.example/a?sig=secret"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, json!({"kind":"stale"}));
+        assert!(dispatch(
+            &svc,
+            &tx,
+            "get_pull_request_content_image",
+            json!({
+                "reference": {"provider":"github","owner":"acme","repo":"api","number":42},
+                "body_digest":"wrong wire key", "source":"https://images.example/a"
+            })
+        )
+        .await
+        .is_err());
     }
 
     /// An unrecognised half sent by the frontend is accepted as its default,

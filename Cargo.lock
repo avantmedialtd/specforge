@@ -3438,6 +3438,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "dirs 6.0.0",
+ "flate2",
  "fs2",
  "globset",
  "keyring",
@@ -3463,12 +3464,14 @@ dependencies = [
  "indexmap 2.14.0",
  "notify",
  "notify-debouncer-full",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "similar",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "url",
 ]
 
 [[package]]

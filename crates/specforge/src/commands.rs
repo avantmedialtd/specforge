@@ -18,7 +18,8 @@ use openspec_app::review_actions::{
 use openspec_app::{
     AppService, Appearance, ArtifactRead, BitbucketConfigView, BitbucketPullRequestsState,
     ChatGptQuotaState, ClaudeQuotaState, DocumentWidth, GithubConfigView, GithubPullRequestsState,
-    IdentityInfo, ImageVersions, LinkResolution, PanelPosition, PullRequestDetailOutcome,
+    IdentityInfo, ImageVersions, LinkResolution, PanelPosition, PrContentLoading,
+    PrContentPreference, PullRequestContentImageOutcome, PullRequestDetailOutcome,
     PullRequestFileOutcome, PullRequestImageOutcome, PullRequestLinks, PullRequestReference,
     ReviewProgress, ReviewSkipPatterns, SettingsStore, SkipPatternsOutcome, WebServerConfig,
 };
@@ -826,6 +827,34 @@ pub async fn get_pull_request_file_image(
     Ok(svc
         .pull_request_file_image(&reference, &path, &head, &base)
         .await)
+}
+
+#[tauri::command]
+pub async fn get_pull_request_content_image(
+    reference: PullRequestReference,
+    body_digest: String,
+    source: String,
+    svc: State<'_, AppService>,
+) -> Result<PullRequestContentImageOutcome, String> {
+    Ok(svc
+        .pull_request_content_image(reference, body_digest, source)
+        .await)
+}
+
+#[tauri::command]
+pub async fn get_pr_content_loading(
+    svc: State<'_, AppService>,
+) -> Result<PrContentLoading, String> {
+    svc.pr_content_loading().await
+}
+
+#[tauri::command]
+pub async fn set_pr_content_loading(
+    preference: PrContentPreference,
+    enabled: bool,
+    svc: State<'_, AppService>,
+) -> Result<PrContentLoading, String> {
+    svc.set_pr_content_loading(preference, enabled).await
 }
 
 /// A pull request's review progress on this machine (`pull-request-viewer`:

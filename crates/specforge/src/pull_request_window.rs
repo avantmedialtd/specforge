@@ -336,7 +336,7 @@ mod tests {
     /// never calls the pop-out command — the window is already detached — nor
     /// any settings writer, provider-writer, document-read or reader-window
     /// command.
-    const PULL_REQUEST_COMMANDS: [&str; 28] = [
+    const PULL_REQUEST_COMMANDS: [&str; 30] = [
         "abandon_review_operation",
         "create_review_draft",
         "edit_review_draft",
@@ -346,6 +346,8 @@ mod tests {
         "get_document_width",
         "get_github_config",
         "get_github_pull_requests",
+        "get_pr_content_loading",
+        "get_pull_request_content_image",
         "get_pull_request_detail",
         "get_pull_request_file",
         "get_pull_request_file_image",
@@ -459,9 +461,9 @@ mod tests {
 
         assert_eq!(
             handlers.len(),
-            93,
+            96,
             "the 83 handlers that predate the capability, its eight review-action handlers \
-             and the appearance pair"
+             and the appearance pair plus three PR loading commands"
         );
         for review_command in [
             "get_review_action_state",
@@ -598,7 +600,7 @@ mod tests {
         }
         assert_eq!(
             commands.len(),
-            89,
+            92,
             "src/api.ts's command wrappers changed shape"
         );
         commands.into_iter().collect()
@@ -679,6 +681,30 @@ mod tests {
                     app.contains(&permission),
                     window == "main" || window == "pull-request",
                     "{window} and {command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pr_content_commands_keep_detached_permissions_read_only() {
+        for (kind, source) in [
+            ("main", MAIN_CAPABILITY),
+            ("pull-request", PULL_REQUEST_CAPABILITY),
+            ("reader", READER_CAPABILITY),
+            ("image", IMAGE_CAPABILITY),
+        ] {
+            let app = app_permissions(&parse(source));
+            for command in [
+                "get_pr_content_loading",
+                "get_pull_request_content_image",
+                "set_pr_content_loading",
+            ] {
+                assert_eq!(
+                    app.contains(&format!("allow-{}", command.replace('_', "-"))),
+                    kind == "main"
+                        || (kind == "pull-request" && command != "set_pr_content_loading"),
+                    "{kind}/{command}"
                 );
             }
         }

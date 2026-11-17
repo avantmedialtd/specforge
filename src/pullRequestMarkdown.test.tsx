@@ -7,6 +7,8 @@ import rehypeKatex from "rehype-katex"
 import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
 import type { Element } from "hast"
+import corpus from "../crates/openspec-core/tests/fixtures/pr-content-images.json"
+import { canonicalPrImageSource } from "./prContentLoading"
 import {
     fenceSource,
     isHtmlComment,
@@ -47,6 +49,21 @@ function count(haystack: string, needle: string): number {
 
 /// An anchor element, and not KaTeX's MathML `<annotation>`.
 const ANCHOR = /<a[\s>]/
+
+describe("shared server/client Markdown-image corpus", () => {
+    for (const entry of corpus) {
+        test(entry.name, () => {
+            const sources = new Set<string>()
+            renderToStaticMarkup(<ReactMarkdown remarkPlugins={[remarkGfm, remarkDropHtmlComments]}
+                components={{ img: ({ src }) => {
+                    const canonical = canonicalPrImageSource(typeof src === "string" ? src : "")
+                    if (canonical) { sources.add(canonical) }
+                    return null
+                } }}>{entry.markdown}</ReactMarkdown>)
+            expect([...sources]).toEqual(entry.sources)
+        })
+    }
+})
 
 describe("raw HTML", () => {
     test("raw HTML stays unrendered", () => {

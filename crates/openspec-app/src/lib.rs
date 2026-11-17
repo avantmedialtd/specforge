@@ -22,6 +22,7 @@ pub mod github;
 pub(crate) mod github_detail;
 pub mod github_review;
 pub mod pull_request_cache;
+pub mod pull_request_content_images;
 pub mod pull_request_detail;
 pub mod pull_request_limits;
 pub mod pull_request_links;
@@ -49,10 +50,12 @@ pub use credential_store::{
 pub use events::{
     document_envelope, event_envelope, notice_envelope, PanelMovedPayload, PullRequestProvider,
     PullRequestProviderChangedPayload, ReviewSkipPatternsChangedPayload, ServiceNotice,
-    EVENT_APPEARANCE_CHANGED, EVENT_DOCUMENT_CHANGED, EVENT_PULL_REQUEST_PROVIDER_CHANGED,
-    EVENT_REVIEW_PROGRESS_CHANGED, EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
+    EVENT_APPEARANCE_CHANGED, EVENT_DOCUMENT_CHANGED, EVENT_PR_CONTENT_LOADING_CHANGED,
+    EVENT_PULL_REQUEST_PROVIDER_CHANGED, EVENT_REVIEW_PROGRESS_CHANGED,
+    EVENT_REVIEW_SKIP_PATTERNS_CHANGED,
 };
 pub use github::{GithubLimits, GithubPullRequestsHandle, GithubPullRequestsState};
+pub use pull_request_content_images::{ContentImageFailure, PullRequestContentImageOutcome};
 pub use pull_request_detail::{
     ConversationEntry, DiffSide, FileReadFailure, ImageSide, ImageVersions, PullRequestCheck,
     PullRequestCheckState, PullRequestComment, PullRequestDetail, PullRequestDetailOutcome,
@@ -82,8 +85,9 @@ pub use service::{
 };
 pub use settings::{
     AppSettings, Appearance, BitbucketConfig, BitbucketConfigView, ColorScheme, DocumentWidth,
-    GithubConfig, GithubConfigView, PanelPosition, PullRequestWindowGeometry, ReaderWindowGeometry,
-    SettingsStore, StoredCredentialSource, TailscaleConfig, Theme, WebServerConfig,
-    PULL_REQUEST_WINDOW_MIN_HEIGHT, PULL_REQUEST_WINDOW_MIN_WIDTH,
+    GithubConfig, GithubConfigView, PanelPosition, PrContentLoading, PrContentPreference,
+    PullRequestWindowGeometry, ReaderWindowGeometry, SettingsStore, StoredCredentialSource,
+    TailscaleConfig, Theme, WebServerConfig, PULL_REQUEST_WINDOW_MIN_HEIGHT,
+    PULL_REQUEST_WINDOW_MIN_WIDTH,
 };
 pub use window_title::{sanitize_window_title, WINDOW_TITLE_CAP};

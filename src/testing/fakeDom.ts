@@ -38,6 +38,12 @@ export class FakeNode extends FakeEventTarget {
     get firstChild() {
         return this.childNodes[0] ?? null
     }
+    get isConnected(): boolean {
+        return this.nodeType === 9 || this.parentNode?.isConnected === true
+    }
+    contains(node: FakeNode): boolean {
+        return node === this || this.childNodes.some(child => child.contains(node))
+    }
     get lastChild() {
         return this.childNodes[this.childNodes.length - 1] ?? null
     }
@@ -97,6 +103,10 @@ export class FakeText extends FakeNode {
 }
 
 export class FakeElement extends FakeNode {
+    get hidden() { return this.hasAttribute("hidden") }
+    set hidden(value: boolean) {
+        if (value) { this.setAttribute("hidden", "") } else { this.removeAttribute("hidden") }
+    }
     get children(): FakeElement[] {
         return this.childNodes.filter((child): child is FakeElement => child instanceof FakeElement)
     }

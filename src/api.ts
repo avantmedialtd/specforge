@@ -35,6 +35,9 @@ import type {
     PaletteColor,
     PanelMovedPayload,
     PanelPosition,
+    PrContentLoading,
+    PrContentPreference,
+    PullRequestContentImageOutcome,
     PullRequestDetailOutcome,
     PullRequestFileOutcome,
     PullRequestImageOutcome,
@@ -58,6 +61,7 @@ import type {
 } from "./types"
 import {
     EVENT_APPEARANCE_CHANGED,
+    EVENT_PR_CONTENT_LOADING_CHANGED,
     EVENT_BITBUCKET_PULL_REQUESTS_UPDATED,
     EVENT_CACHE_UPDATED,
     EVENT_COMMIT_HISTORY_ENABLED_CHANGED,
@@ -146,6 +150,16 @@ async function webInvoke<T>(
 // has been suspended — lives in ./eventStream; this only adapts SSE frames into
 // typed payloads.
 
+/// PR replies may contain signed image sources or image bytes. Diagnostics
+/// intentionally reveal neither replies nor underlying transport errors.
+export function apiDiagnostic(command: string, part: "args" | "result" | "error", value: unknown): unknown {
+    if (command === "get_pull_request_content_image") { return "<private content image>" }
+    if (part !== "args" && [
+        "get_pull_request_detail", "get_pull_request_file", "get_pull_request_file_image",
+    ].includes(command)) { return "<private PR content>" }
+    return value
+}
+
 function webListen<T>(
     event: string,
     handler: (payload: T) => void,
@@ -175,20 +189,21 @@ async function invokeLogged<T>(
     loggedArgs: Record<string, unknown> | undefined = args,
 ): Promise<T> {
     if (import.meta.env.DEV) {
-        console.log(`[api] → ${command}`, loggedArgs ?? {})
+        console.log(`[api] → ${command}`, apiDiagnostic(command, "args", loggedArgs ?? {}))
     }
     try {
         const result = isTauri()
             ? await tauriInvoke<T>(command, args)
             : await webInvoke<T>(command, args)
         if (import.meta.env.DEV) {
-            console.log(`[api] ← ${command}`, result)
+            console.log(`[api] ← ${command}`, apiDiagnostic(command, "result", result))
         }
         return result
     } catch (err) {
         if (import.meta.env.DEV) {
-            console.warn(`[api] ✗ ${command}`, err)
+            console.warn(`[api] ✗ ${command}`, apiDiagnostic(command, "error", err))
         }
+        if (command === "get_pull_request_content_image") { throw new Error("The embedded image could not be read") }
         throw err
     }
 }
@@ -575,6 +590,24 @@ export async function getPullRequestFileImage(
         head,
         base,
     })
+}
+
+export async function getPullRequestContentImage(
+    reference: PullRequestReference,
+    bodyDigest: string,
+    source: string,
+): Promise<PullRequestContentImageOutcome> {
+    return invokeLogged<PullRequestContentImageOutcome>("get_pull_request_content_image", {
+        reference, bodyDigest, source,
+    })
+}
+
+export async function getPrContentLoading(): Promise<PrContentLoading> {
+    return invokeLogged<PrContentLoading>("get_pr_content_loading")
+}
+
+export async function setPrContentLoading(preference: PrContentPreference, enabled: boolean): Promise<PrContentLoading> {
+    return invokeLogged<PrContentLoading>("set_pr_content_loading", { preference, enabled })
 }
 
 /// A pull request's review progress on this machine, for the files of its
@@ -1130,6 +1163,10 @@ export function onAppearanceChanged(
     handler: (appearance: Appearance) => void,
 ): Promise<UnlistenFn> {
     return listenLogged<Appearance>(EVENT_APPEARANCE_CHANGED, handler)
+}
+
+export function onPrContentLoadingChanged(handler: (preferences: PrContentLoading) => void): Promise<UnlistenFn> {
+    return listenLogged<PrContentLoading>(EVENT_PR_CONTENT_LOADING_CHANGED, handler)
 }
 
 /// Fires when the Commit history switch changes anywhere — another window of

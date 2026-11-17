@@ -24,6 +24,10 @@ similar = "3"
 # (`image::inspect`). Only the seven formats the diff view draws; already in
 # the lockfile through `resvg`.
 imagesize = { version = "0.15", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "heif"] }
+# PR embedded-image authority comes from parsed Markdown, never a URL regex.
+# Both packages already exist at these versions in the workspace lockfile.
+pulldown-cmark = { version = "0.13.4", default-features = false }
+url = "2.5.8"
 
 [lints]
 workspace = true

@@ -31,6 +31,11 @@ import {
     submitReview,
 } from "./api"
 import { shortHash } from "./routing/slug"
+import {
+    apiDiagnostic, getPrContentLoading, setPrContentLoading, getPullRequestContentImage,
+    onPrContentLoadingChanged,
+} from "./api"
+import { installFakeTransport, FakeEventSource } from "./testing/fakeTransport"
 import type { Appearance, DraftItemInput, PullRequestReference } from "./types"
 
 // The tree's collapse-state surface is asserted against the source text: what
@@ -40,6 +45,61 @@ const API_SOURCE = readFileSync(
     fileURLToPath(new URL("./api.ts", import.meta.url)),
     "utf8",
 )
+
+describe("PR content loading transport contract and privacy", () => {
+    const reference: PullRequestReference = { provider: "github", owner: "acme", repo: "api", number: 42 }
+    const source = "https://images.example/a.png?sig=secret"
+
+    test("web commands preserve argument keys and effective outcomes, and notices are shared", async () => {
+        const args: unknown[] = []
+        const pair = { autoShowImages: true, autoLoadLargeDiffs: false }
+        const transport = installFakeTransport((command, arguments_) => {
+            args.push([command, arguments_])
+            return command === "get_pull_request_content_image" ? { kind: "stale" } : pair
+        })
+        let unlisten: (() => void) | undefined
+        try {
+            expect(await getPrContentLoading()).toEqual(pair)
+            expect(await setPrContentLoading("autoShowImages", true)).toEqual(pair)
+            expect(await getPullRequestContentImage(reference, "body-sha256", source)).toEqual({ kind: "stale" })
+            expect(args).toEqual([
+                ["get_pr_content_loading", {}],
+                ["set_pr_content_loading", { preference: "autoShowImages", enabled: true }],
+                ["get_pull_request_content_image", { reference, bodyDigest: "body-sha256", source }],
+            ])
+            const heard: unknown[] = []
+            unlisten = await onPrContentLoadingChanged(p => heard.push(p))
+            FakeEventSource.current!.emit("pr-content-loading-changed", pair)
+            expect(heard).toEqual([pair])
+        } finally {
+            unlisten?.()
+            transport.uninstall()
+        }
+    })
+
+    test("diagnostics exclude signed queries, bodies, image data and raw errors", () => {
+        for (const [command, parts] of [
+            ["get_pull_request_content_image", ["args", "result", "error"]],
+            ["get_pull_request_detail", ["result", "error"]],
+            ["get_pull_request_file_image", ["result", "error"]],
+            ["get_pull_request_file", ["result", "error"]],
+        ] as const) {
+            for (const part of parts) {
+                expect(String(apiDiagnostic(command, part, { source, data: "image-bytes", error: source }))).not.toContain("secret")
+                expect(String(apiDiagnostic(command, part, "image-bytes"))).not.toContain("image-bytes")
+            }
+        }
+        expect(apiDiagnostic("get_pr_content_loading", "result", true)).toBe(true)
+    })
+
+    test("raw embedded-image transport errors never reach UI diagnostics either", async () => {
+        const transport = installFakeTransport(() => { throw new Error(source) })
+        try {
+            await expect(getPullRequestContentImage(reference, "digest", source))
+                .rejects.toThrow("The embedded image could not be read")
+        } finally { transport.uninstall() }
+    })
+})
 
 describe("the tree's collapse-state wrappers are gone", () => {
     // Top-level disclosure is session-only (design D6), so a reveal has no
@@ -139,6 +199,20 @@ describe("the pull-request window, its links and its notices", () => {
         repo: "api",
         number: 42,
     }
+
+    test("desktop PR content commands use the same typed wire arguments", async () => {
+        const host = desktop()
+        await getPrContentLoading()
+        await setPrContentLoading("autoLoadLargeDiffs", true)
+        await getPullRequestContentImage(REFERENCE, "body-digest", "https://images.example/a?sig=secret")
+        expect(host.sent).toEqual([
+            ["get_pr_content_loading", {}],
+            ["set_pr_content_loading", { preference: "autoLoadLargeDiffs", enabled: true }],
+            ["get_pull_request_content_image", {
+                reference: REFERENCE, bodyDigest: "body-digest", source: "https://images.example/a?sig=secret",
+            }],
+        ])
+    })
 
     test("the desktop opens the window through its command, inside the click", () => {
         const host = desktop()

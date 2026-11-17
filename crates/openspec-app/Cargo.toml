@@ -27,7 +27,9 @@ dirs = "6"
 # No feature list: ureq 3's defaults are ["rustls", "gzip"] — rustls-on-ring with
 # webpki-roots, the same backend and trust anchors ureq 2's ["tls", "gzip"] gave,
 # so release.yml's zig cross-build note about ring still holds.
-ureq = "3"
+# The credentialless image connector uses ureq's explicitly unversioned
+# resolver/transport API. Pin its reviewed implementation until re-audited.
+ureq = "=3.4.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Single-decode of a markdown link href before it's resolved against the
 # authorized root (`AppService::open_artifact_link`). Already resolved in
@@ -73,6 +75,8 @@ keyring = { workspace = true, features = ["apple-native", "windows-native", "syn
 
 [dev-dependencies]
 serde_json = "1"
+# Already locked through ureq; exercise the actual decoded-body ceiling.
+flate2 = "1"
 # Temporary directories for the tests. The config stores' atomic writes
 # (NamedTempFile + persist) live in `openspec_core::config_file`, so no library
 # code here uses it. Already resolved in Cargo.lock as `openspec-core`'s edge,
