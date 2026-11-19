@@ -118,7 +118,7 @@ use openspec_app::settings::{
     PrContentLoading, PrContentPreference, StoredCredentialSource, TailscaleConfig, Theme,
     WebServerConfig,
 };
-use openspec_app::{ContentImageFailure, PullRequestContentImageOutcome};
+use openspec_app::{ContentImageFailure, PullRequestContentImageOutcome, UnavailableReason};
 
 use openspec_core::dashboard::{
     DashboardData, HeatmapCell, ProgressData, RepoBreakdown, ShipEntry, StreakInfo, SummaryMetrics,
@@ -972,6 +972,8 @@ fn pull_request_payloads_are_camel_case() {
                 "https://bitbucket.org/acme/specforge/pull-requests/42",
             )],
             skipped_workspaces: vec!["locked-workspace".to_string()],
+            // The struct variant, so its field's key is emitted and seen.
+            reason: Some(UnavailableReason::HttpStatus { status: 503 }),
         },
     );
     assert_camel_case(
@@ -2658,6 +2660,40 @@ fn pull_requests_status_matches_the_declared_union() {
         "unavailable",
     );
     assert_wire_value("Ok", PullRequestsStatus::Ok, "ok");
+}
+
+/// `UnavailableReason` — a union `src/types.ts` matches on `kind`, so each
+/// variant's discriminant is asserted by exact value: a dropped `rename_all`
+/// would send `CertificateUntrusted`, which no member matches and the walker
+/// cannot see. `httpStatus` also carries its `status`.
+#[test]
+fn unavailable_reason_discriminants_match_the_declared_union() {
+    for (reason, kind) in [
+        (
+            UnavailableReason::CertificateUntrusted,
+            "certificateUntrusted",
+        ),
+        (UnavailableReason::Tls, "tls"),
+        (UnavailableReason::Dns, "dns"),
+        (UnavailableReason::Connect, "connect"),
+        (UnavailableReason::Timeout, "timeout"),
+        (UnavailableReason::UnexpectedResponse, "unexpectedResponse"),
+        (UnavailableReason::RateLimited, "rateLimited"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(reason).unwrap(),
+            serde_json::json!({ "kind": kind }),
+            "{reason:?}"
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(UnavailableReason::HttpStatus { status: 503 }).unwrap(),
+        serde_json::json!({ "kind": "httpStatus", "status": 503 })
+    );
+    // The snapshot names it `reason`, `null` when it has none.
+    let wire = serde_json::to_value(BitbucketPullRequestsState::disabled()).unwrap();
+    assert_eq!(wire["reason"], Value::Null);
+    assert!(wire.as_object().unwrap().contains_key("reason"));
 }
 
 /// `DocumentWidth` — `src/types.ts`: `"compact" | "default" | "wide" | "full"`.

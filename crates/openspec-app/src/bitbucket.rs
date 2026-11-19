@@ -10,8 +10,15 @@
 //! off, no credential is read and no request is made. The credential travels
 //! only to `https://api.bitbucket.org`, only in the `Authorization` header that
 //! `usage_http::Auth` builds, never through an ambient proxy (`usage_http::get`
-//! pins `proxy(None)`), and is never formatted into any other string — no
-//! outcome or state in this module carries text about a failure at all.
+//! pins `proxy(None)`), and is never formatted into any other string.
+//!
+//! A failed refresh says why, in two places and no more
+//! (`bitbucket-pull-requests`: *Unavailable and Stale Snapshots Carry a
+//! Reason*, *Failures Are Reported on Standard Error*). The snapshot carries
+//! the reason from a closed set, [`UnavailableReason`], and never any text. The
+//! poll loop writes one line to standard error when the reason changes, naming
+//! the failed request by its path template ([`Request::template`]), never by
+//! its URL, and adding only the TLS or I/O error's own message.
 //!
 //! The pure parts — URL building, credential resolution, the account
 //! identifier, the parsers, the review summary, the merge, the state
@@ -42,7 +49,7 @@ use crate::pull_requests::{
 use crate::quota::parse_rfc3339_to_unix;
 use crate::review_actions;
 use crate::settings::SettingsStore;
-use crate::usage_http::{self, Auth, Verdict};
+use crate::usage_http::{self, Auth, RequestFailure, TransportFailure, UnavailableReason, Verdict};
 
 /// The API root. The only destination the credential is ever sent to.
 pub(crate) const API_BASE: &str = "https://api.bitbucket.org/2.0";
@@ -133,6 +140,12 @@ pub struct BitbucketPullRequestsState {
     /// Slugs of the workspaces that answered 403 or 404 and were skipped —
     /// informational, never an error.
     pub skipped_workspaces: Vec<String>,
+    /// Why the last refresh failed: `Some` exactly while the snapshot is
+    /// unavailable or stale, `None` while it is ok, unauthenticated or
+    /// disabled. Part of the snapshot, so a changed reason is announced
+    /// (`bitbucket-pull-requests`: *Unavailable and Stale Snapshots Carry a
+    /// Reason*).
+    pub reason: Option<UnavailableReason>,
 }
 
 impl BitbucketPullRequestsState {
@@ -141,7 +154,7 @@ impl BitbucketPullRequestsState {
         Self::status_only(PullRequestsStatus::Disabled)
     }
 
-    /// A snapshot carrying only a status (no rows).
+    /// A snapshot carrying only a status (no rows, no reason).
     fn status_only(status: PullRequestsStatus) -> Self {
         Self {
             status,
@@ -149,6 +162,15 @@ impl BitbucketPullRequestsState {
             fetched_at_unix: None,
             pull_requests: Vec::new(),
             skipped_workspaces: Vec::new(),
+            reason: None,
+        }
+    }
+
+    /// The unavailable snapshot, and why.
+    fn unavailable(reason: UnavailableReason) -> Self {
+        Self {
+            reason: Some(reason),
+            ..Self::status_only(PullRequestsStatus::Unavailable)
         }
     }
 }
@@ -553,20 +575,73 @@ enum FetchResult {
     /// the account or workspace-membership read scope, which is the common
     /// misconfiguration and is fixed in Settings, not by waiting.
     Unauthenticated,
-    /// A 2xx body could not be parsed into the expected shape.
-    Unavailable,
+    /// A 2xx body could not be read whole, or parsed into the expected shape.
+    Unavailable(RequestFailure),
     /// Rate-limited (429); back off for the hinted (or default) delay.
-    RateLimited { retry_after: Option<u64> },
+    RateLimited {
+        retry_after: Option<u64>,
+        failure: RequestFailure,
+    },
     /// A transport error or any other non-success status — keep the last rows.
-    Transient,
+    Transient(RequestFailure),
 }
 
-/// One reply, reduced to what the recipe reads off it: the verdict
-/// `usage_http::classify` gave its status, and its body when that verdict is
-/// `Read`. A transport error (offline, timeout, TLS) is no reply at all.
-struct Reply {
-    verdict: Verdict,
-    body: Option<String>,
+impl FetchResult {
+    /// The failed request the refresh stopped on, when it failed with a
+    /// reason. An ok or unauthenticated refresh has none.
+    fn failure(&self) -> Option<&RequestFailure> {
+        match self {
+            FetchResult::Unavailable(failure)
+            | FetchResult::RateLimited { failure, .. }
+            | FetchResult::Transient(failure) => Some(failure),
+            FetchResult::Ok { .. } | FetchResult::Unauthenticated => None,
+        }
+    }
+}
+
+/// One request of a refresh, by kind. Its standard-error line names it by
+/// [`Request::template`], never by its URL, so no workspace, account or query
+/// string can reach the line (`bitbucket-pull-requests`: *Failures Are
+/// Reported on Standard Error*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Request {
+    /// The account, `GET /2.0/user`.
+    User,
+    /// A page of the account's workspaces.
+    Workspaces,
+    /// One workspace's open pull requests authored by the account.
+    PullRequests,
+}
+
+impl Request {
+    /// The request's path, with `{workspace}` and `{user}` in place of the
+    /// values.
+    fn template(self) -> &'static str {
+        match self {
+            Request::User => "/2.0/user",
+            Request::Workspaces => "/2.0/user/workspaces",
+            Request::PullRequests => "/2.0/workspaces/{workspace}/pullrequests/{user}",
+        }
+    }
+
+    /// This request's failure for `reason`, with no error message of its own.
+    fn failed(self, reason: UnavailableReason) -> RequestFailure {
+        RequestFailure::because(self.template(), reason)
+    }
+}
+
+/// One reply, reduced to what the recipe reads off it. A transport error
+/// (offline, timeout, TLS) is no reply at all, but the [`TransportFailure`]
+/// that says why.
+#[derive(Debug, PartialEq, Eq)]
+enum Reply {
+    /// A 2xx, and its body.
+    Read(String),
+    /// A 2xx whose body could not be read whole: the transport failed under
+    /// it.
+    Unread(TransportFailure),
+    /// Any other status, and the verdict `usage_http::classify` gave it.
+    Status { status: u16, verdict: Verdict },
 }
 
 /// One refresh's request chain over `get`, asking `may_send` before every
@@ -577,7 +652,7 @@ struct Reply {
 /// (`bitbucket-pull-requests`: *A detail read's failure leaves the snapshot
 /// unchanged*).
 fn refresh(
-    mut get: impl FnMut(&str) -> Option<Reply>,
+    mut get: impl FnMut(&str) -> Result<Reply, TransportFailure>,
     may_send: impl Fn() -> bool,
 ) -> Option<FetchResult> {
     let mut stopped = false;
@@ -586,48 +661,70 @@ fn refresh(
             get(url)
         } else {
             stopped = true;
-            None
+            // Never read: a stopped chain's result is dropped below.
+            Err(TransportFailure {
+                reason: UnavailableReason::Connect,
+                message: None,
+            })
         }
     });
     (!stopped).then_some(result)
 }
 
-/// One authenticated GET. Nothing about it — the URL, the error, the reply —
-/// is logged, and the credential is only ever inside the header.
-fn send(url: &str, username: &str, token: &str) -> Option<Reply> {
-    let mut response = usage_http::get(url, Auth::Basic { username, token })
-        .header("Accept", "application/json")
-        .header("User-Agent", USER_AGENT)
-        .call()
-        .ok()?;
+/// One authenticated GET. The credential is only ever inside the header, and
+/// a failure carries only its classified reason and the TLS or I/O error's own
+/// message, never the URL or the reply.
+fn send(url: &str, username: &str, token: &str) -> Result<Reply, TransportFailure> {
+    read_reply(
+        usage_http::get(url, Auth::Basic { username, token })
+            .header("Accept", "application/json")
+            .header("User-Agent", USER_AGENT)
+            .call(),
+    )
+}
+
+/// What one request came to, as the recipe reads it: the transport failure
+/// that left it without a reply, or its status's verdict and, for a 2xx, its
+/// body or the failure that cut the body short.
+fn read_reply(
+    called: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<Reply, TransportFailure> {
+    let mut response = called.map_err(|error| TransportFailure::of(&error))?;
+    let status = response.status().as_u16();
     let retry_after = response
         .headers()
         .get("Retry-After")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
-    let verdict = usage_http::classify(response.status().as_u16(), retry_after.as_deref());
-    let body = match verdict {
-        Verdict::Read => response.body_mut().read_to_string().ok(),
-        _ => None,
-    };
-    Some(Reply { verdict, body })
+    Ok(match usage_http::classify(status, retry_after.as_deref()) {
+        Verdict::Read => match response.body_mut().read_to_string() {
+            Ok(body) => Reply::Read(body),
+            Err(error) => Reply::Unread(TransportFailure::of(&error)),
+        },
+        verdict => Reply::Status { status, verdict },
+    })
 }
 
 /// The chain itself, over an injected `get`, so every branch is testable
 /// without a network: the account, its workspaces (one page for up to a
 /// hundred of them), then each workspace's authored pull requests —
 /// sequentially, `2 + W` requests in all.
-fn fetch_snapshot_with(mut get: impl FnMut(&str) -> Option<Reply>) -> FetchResult {
-    let user = match body_of(get(&format!("{API_BASE}/user"))) {
+fn fetch_snapshot_with(
+    mut get: impl FnMut(&str) -> Result<Reply, TransportFailure>,
+) -> FetchResult {
+    let unexpected = |request: Request| {
+        FetchResult::Unavailable(request.failed(UnavailableReason::UnexpectedResponse))
+    };
+    let user = match body_of(get(&format!("{API_BASE}/user")), Request::User) {
         Ok(body) => body,
         Err(stop) => return stop,
     };
     let Ok(user) = serde_json::from_str::<Value>(&user) else {
-        return FetchResult::Unavailable;
+        return unexpected(Request::User);
     };
     let identity = parse_identity(&user);
     let Some(account) = identity.request_identifier().map(str::to_string) else {
-        return FetchResult::Unavailable;
+        return unexpected(Request::User);
     };
 
     let mut slugs = Vec::new();
@@ -639,12 +736,12 @@ fn fetch_snapshot_with(mut get: impl FnMut(&str) -> Option<Reply>) -> FetchResul
         let Some(url) = page_url.take() else {
             break;
         };
-        let workspaces = match body_of(get(&url)) {
+        let workspaces = match body_of(get(&url), Request::Workspaces) {
             Ok(body) => body,
             Err(stop) => return stop,
         };
         let Some((page_slugs, next)) = parse_workspace_slugs(&workspaces) else {
-            return FetchResult::Unavailable;
+            return unexpected(Request::Workspaces);
         };
         slugs.extend(page_slugs);
         page_url = next;
@@ -656,7 +753,7 @@ fn fetch_snapshot_with(mut get: impl FnMut(&str) -> Option<Reply>) -> FetchResul
         let reply = get(&build_pull_requests_url(&slug, &account));
         // A workspace the token cannot read is skipped and named; the others
         // still list.
-        if let Some(Reply {
+        if let Ok(Reply::Status {
             verdict: Verdict::Forbidden | Verdict::NotFound,
             ..
         }) = reply
@@ -664,12 +761,12 @@ fn fetch_snapshot_with(mut get: impl FnMut(&str) -> Option<Reply>) -> FetchResul
             skipped_workspaces.push(slug);
             continue;
         }
-        let page = match body_of(reply) {
+        let page = match body_of(reply, Request::PullRequests) {
             Ok(body) => body,
             Err(stop) => return stop,
         };
         let Some(rows) = parse_pull_requests(&page) else {
-            return FetchResult::Unavailable;
+            return unexpected(Request::PullRequests);
         };
         per_workspace.push(rows);
     }
@@ -681,22 +778,39 @@ fn fetch_snapshot_with(mut get: impl FnMut(&str) -> Option<Reply>) -> FetchResul
     }
 }
 
-/// A reply's body, or the result the whole refresh stops with.
-fn body_of(reply: Option<Reply>) -> Result<String, FetchResult> {
-    let Some(reply) = reply else {
-        return Err(FetchResult::Transient);
-    };
-    match reply.verdict {
-        Verdict::Read => reply.body.ok_or(FetchResult::Unavailable),
-        Verdict::Unauthenticated => Err(FetchResult::Unauthenticated),
-        Verdict::RateLimited { retry_after } => Err(FetchResult::RateLimited { retry_after }),
-        // Outside the per-workspace step there is nothing to skip. A 403 on
-        // `/user` or `/user/workspaces` means the token lacks a read scope the
-        // recipe needs — a credential problem the user fixes in Settings, so
-        // it reports as unauthenticated rather than as an outage. A 404 there
-        // is as transient as any other status.
-        Verdict::Forbidden => Err(FetchResult::Unauthenticated),
-        Verdict::NotFound | Verdict::Transient => Err(FetchResult::Transient),
+/// A reply's body, or the result the whole refresh stops with, its failure
+/// naming `request`.
+fn body_of(
+    reply: Result<Reply, TransportFailure>,
+    request: Request,
+) -> Result<String, FetchResult> {
+    let transport = |failure| RequestFailure::transport(request.template(), failure);
+    match reply {
+        Ok(Reply::Read(body)) => Ok(body),
+        // A body that could not be read whole is as unavailable as one that
+        // does not parse.
+        Ok(Reply::Unread(failure)) => Err(FetchResult::Unavailable(transport(failure))),
+        Err(failure) => Err(FetchResult::Transient(transport(failure))),
+        Ok(Reply::Status { status, verdict }) => Err(match verdict {
+            // A read verdict with no body: nothing to parse.
+            Verdict::Read => {
+                FetchResult::Unavailable(request.failed(UnavailableReason::UnexpectedResponse))
+            }
+            Verdict::Unauthenticated => FetchResult::Unauthenticated,
+            Verdict::RateLimited { retry_after } => FetchResult::RateLimited {
+                retry_after,
+                failure: request.failed(UnavailableReason::RateLimited),
+            },
+            // Outside the per-workspace step there is nothing to skip. A 403
+            // on `/user` or `/user/workspaces` means the token lacks a read
+            // scope the recipe needs — a credential problem the user fixes in
+            // Settings, so it reports as unauthenticated rather than as an
+            // outage. A 404 there is as transient as any other status.
+            Verdict::Forbidden => FetchResult::Unauthenticated,
+            Verdict::NotFound | Verdict::Transient => {
+                FetchResult::Transient(request.failed(UnavailableReason::HttpStatus { status }))
+            }
+        }),
     }
 }
 
@@ -750,10 +864,10 @@ impl Default for BitbucketLimits {
 /// The tick rule for a provider enabled inside its deadline
 /// (`bitbucket-pull-requests`: *Polling With Caching and Backoff*): while the
 /// deadline holds, a snapshot still reading `disabled` is published as
-/// `unavailable` and announced at once, as a 429 with no previous rows reads,
-/// so the panel and any pull-request address say BitBucket is unavailable
-/// rather than loading until the deadline passes. The caller has checked that
-/// BitBucket is enabled. Returns whether it published.
+/// `unavailable`, rate limited, and announced at once, as a 429 with no
+/// previous rows reads, so the panel and any pull-request address say
+/// BitBucket is unavailable rather than loading until the deadline passes. The
+/// caller has checked that BitBucket is enabled. Returns whether it published.
 pub(crate) fn publish_held_unavailable(
     handle: &BitbucketPullRequestsHandle,
     watcher: &WatcherManager,
@@ -763,8 +877,8 @@ pub(crate) fn publish_held_unavailable(
     if !limits.holds_poller(now_unix) || handle.get().status != PullRequestsStatus::Disabled {
         return false;
     }
-    handle.set(BitbucketPullRequestsState::status_only(
-        PullRequestsStatus::Unavailable,
+    handle.set(BitbucketPullRequestsState::unavailable(
+        UnavailableReason::RateLimited,
     ));
     watcher.emit(CacheEvent::BitbucketPullRequestsUpdated);
     true
@@ -789,27 +903,35 @@ fn next_state(
             fetched_at_unix: Some(now_unix),
             pull_requests,
             skipped_workspaces,
+            reason: None,
         },
         FetchResult::Unauthenticated => {
             BitbucketPullRequestsState::status_only(PullRequestsStatus::Unauthenticated)
         }
-        FetchResult::Unavailable => {
-            BitbucketPullRequestsState::status_only(PullRequestsStatus::Unavailable)
+        FetchResult::Unavailable(failure) => {
+            BitbucketPullRequestsState::unavailable(failure.reason)
         }
-        FetchResult::RateLimited { .. } | FetchResult::Transient => degrade_to_stale(prev),
+        FetchResult::RateLimited { failure, .. } | FetchResult::Transient(failure) => {
+            degrade_to_stale(prev, failure.reason)
+        }
     }
 }
 
-/// After a transient failure or a 429: keep the previous rows, marked stale.
-/// With no previous rows to keep, the snapshot is unavailable.
-fn degrade_to_stale(prev: &BitbucketPullRequestsState) -> BitbucketPullRequestsState {
+/// After a transient failure or a 429: keep the previous rows, marked stale,
+/// and say why. With no previous rows to keep, the snapshot is unavailable,
+/// for the same reason.
+fn degrade_to_stale(
+    prev: &BitbucketPullRequestsState,
+    reason: UnavailableReason,
+) -> BitbucketPullRequestsState {
     if prev.status == PullRequestsStatus::Ok && !prev.pull_requests.is_empty() {
         BitbucketPullRequestsState {
             stale: true,
+            reason: Some(reason),
             ..prev.clone()
         }
     } else {
-        BitbucketPullRequestsState::status_only(PullRequestsStatus::Unavailable)
+        BitbucketPullRequestsState::unavailable(reason)
     }
 }
 
@@ -853,10 +975,48 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// The line a recovery writes.
+const RECOVERED: &str = "specforge: bitbucket: recovered";
+
+/// What the poll loop says on standard error (`bitbucket-pull-requests`:
+/// *Failures Are Reported on Standard Error*), and the reason of the refresh
+/// before, while it failed. A refresh that fails for a new reason, the first
+/// failure included, writes its request's line; one that fails as the refresh
+/// before it did writes nothing, so a lasting outage is one line, not one per
+/// poll; and the first refresh that succeeds after a failure writes that
+/// BitBucket has recovered. An unauthenticated refresh has no failure reason,
+/// as its snapshot has none: it writes nothing, and the next failure is new.
+#[derive(Debug, Default)]
+struct FailureLog {
+    failing: Option<UnavailableReason>,
+}
+
+impl FailureLog {
+    /// Notes one adopted refresh's result, writing its line, if it calls for
+    /// one, through `write`.
+    fn observe(&mut self, result: &FetchResult, mut write: impl FnMut(&str)) {
+        let previous = self.failing.take();
+        match result.failure() {
+            Some(failure) => {
+                self.failing = Some(failure.reason);
+                if previous != self.failing {
+                    write(&failure.line("bitbucket"));
+                }
+            }
+            None => {
+                if previous.is_some() && matches!(result, FetchResult::Ok { .. }) {
+                    write(RECOVERED);
+                }
+            }
+        }
+    }
+}
+
 /// Run the poll loop on the calling thread. Honours the enabled flag, the
 /// refresh interval and the deadline, caches the latest snapshot, and emits
 /// `CacheEvent::BitbucketPullRequestsUpdated` whenever the snapshot changes. Never reads
-/// a credential or issues a request while disabled.
+/// a credential or issues a request while disabled. Reports a changed failure
+/// reason, and a recovery, on standard error ([`FailureLog`]).
 fn run_poller(
     settings: Arc<SettingsStore>,
     watcher: WatcherManager,
@@ -864,18 +1024,21 @@ fn run_poller(
     limits: BitbucketLimits,
 ) {
     let mut last_poll: Option<Instant> = None;
+    let mut failures = FailureLog::default();
 
     loop {
         if !settings.bitbucket_enabled() {
             // Idle: collapse to Disabled once (announcing, so the panel goes),
             // then keep sleeping without touching a credential or the network.
             // The deadline stays: it is the provider's, and switching it off
-            // and on must not reset it (design D8).
+            // and on must not reset it (design D8). The failure log does
+            // reset, so a failure after switching back on is reported anew.
             if handle.get().status != PullRequestsStatus::Disabled {
                 handle.set(BitbucketPullRequestsState::disabled());
                 watcher.emit(CacheEvent::BitbucketPullRequestsUpdated);
             }
             last_poll = None;
+            failures = FailureLog::default();
             std::thread::sleep(TICK);
             continue;
         }
@@ -900,13 +1063,16 @@ fn run_poller(
                 _ => None,
             };
             last_poll = Some(now);
-            if let Some(FetchResult::RateLimited { retry_after }) = &result {
+            if let Some(FetchResult::RateLimited { retry_after, .. }) = &result {
                 limits.rate_limited(*retry_after, now_unix());
             }
             // Stopped short, or switched off once the chain ran: drop the
             // result, and let the next pass collapse the snapshot to Disabled
             // or wait the deadline out.
             if settings.bitbucket_enabled() {
+                if let Some(result) = &result {
+                    failures.observe(result, |line| eprintln!("{line}"));
+                }
                 adopt_refresh(
                     &handle,
                     &watcher,
@@ -1023,7 +1189,52 @@ mod tests {
             fetched_at_unix: Some(1_000),
             pull_requests: rows,
             skipped_workspaces: vec!["locked-ws".to_string()],
+            reason: None,
         }
+    }
+
+    /// A request that produced no reply, for `reason`, with the TLS or I/O
+    /// error's own message.
+    fn transport(reason: UnavailableReason, message: &str) -> TransportFailure {
+        TransportFailure {
+            reason,
+            message: Some(message.to_string()),
+        }
+    }
+
+    /// What an offline route answers: a refused connection.
+    fn offline_failure() -> TransportFailure {
+        transport(UnavailableReason::Connect, "connection refused")
+    }
+
+    /// The rejected certificate a TLS-inspecting network's re-signed chain
+    /// meets.
+    fn untrusted_certificate() -> TransportFailure {
+        transport(
+            UnavailableReason::CertificateUntrusted,
+            "invalid peer certificate: UnknownIssuer",
+        )
+    }
+
+    /// A refresh that timed out on `/2.0/user`.
+    fn timed_out() -> FetchResult {
+        FetchResult::Transient(RequestFailure::transport(
+            "/2.0/user",
+            transport(UnavailableReason::Timeout, "timeout: global"),
+        ))
+    }
+
+    /// The reply a scripted route gives: its status and body, read as `send`
+    /// reads a reply, or `failure` when the route is offline.
+    fn scripted(
+        reply: Option<(u16, String)>,
+        failure: &TransportFailure,
+    ) -> Result<Reply, TransportFailure> {
+        let (status, body) = reply.ok_or_else(|| failure.clone())?;
+        Ok(match classify(status, None) {
+            Verdict::Read => Reply::Read(body),
+            verdict => Reply::Status { status, verdict },
+        })
     }
 
     fn user(account_id: &str, uuid: &str) -> Value {
@@ -1439,9 +1650,11 @@ mod tests {
     // ------------------------------------------------------------ the chain
 
     /// A scripted BitBucket: each URL prefix maps to a `(status, body)` reply,
-    /// or to a transport error; every URL requested is recorded.
+    /// or to a transport error (`failure`, a refused connection unless the
+    /// test says otherwise); every URL requested is recorded.
     struct FakeApi {
         routes: Vec<(String, Option<(u16, String)>)>,
+        failure: TransportFailure,
         requested: Vec<String>,
     }
 
@@ -1449,8 +1662,15 @@ mod tests {
         fn new() -> Self {
             Self {
                 routes: Vec::new(),
+                failure: offline_failure(),
                 requested: Vec::new(),
             }
+        }
+
+        /// Offline routes fail with `failure`.
+        fn failing_with(mut self, failure: TransportFailure) -> Self {
+            self.failure = failure;
+            self
         }
 
         fn route(mut self, prefix: &str, status: u16, body: Value) -> Self {
@@ -1476,6 +1696,7 @@ mod tests {
 
         fn fetch(&mut self) -> FetchResult {
             let routes = &self.routes;
+            let failure = &self.failure;
             let requested = &mut self.requested;
             fetch_snapshot_with(|url| {
                 requested.push(url.to_string());
@@ -1483,10 +1704,7 @@ mod tests {
                     .iter()
                     .find(|(prefix, _)| url.starts_with(prefix.as_str()))
                     .unwrap_or_else(|| panic!("unscripted request: {url}"));
-                let (status, body) = reply.clone()?;
-                let verdict = classify(status, None);
-                let body = (verdict == Verdict::Read).then_some(body);
-                Some(Reply { verdict, body })
+                scripted(reply.clone(), failure)
             })
         }
     }
@@ -1637,41 +1855,91 @@ mod tests {
     fn a_429_carries_its_hint_back() {
         let fetched = fetch_snapshot_with(|url| {
             if url.ends_with("/user") {
-                Some(Reply {
-                    verdict: Verdict::Read,
-                    body: Some(json!({ "uuid": "{me}" }).to_string()),
-                })
+                Ok(Reply::Read(json!({ "uuid": "{me}" }).to_string()))
             } else {
-                Some(Reply {
+                Ok(Reply::Status {
+                    status: 429,
                     verdict: classify(429, Some("30")),
-                    body: None,
                 })
             }
         });
         assert_eq!(
             fetched,
             FetchResult::RateLimited {
-                retry_after: Some(30)
+                retry_after: Some(30),
+                failure: RequestFailure::because(
+                    "/2.0/user/workspaces",
+                    UnavailableReason::RateLimited
+                ),
             }
         );
     }
 
+    /// Each failure names the request it stopped on, by template, and why:
+    /// a transport failure with the error's own message, any other status
+    /// with its code (`bitbucket-pull-requests`: *A server error carries its
+    /// status*).
     #[test]
     fn transport_errors_and_other_statuses_are_transient() {
         let mut api = FakeApi::new().offline("/user");
-        assert_eq!(api.fetch(), FetchResult::Transient);
+        assert_eq!(
+            api.fetch(),
+            FetchResult::Transient(RequestFailure::transport("/2.0/user", offline_failure()))
+        );
 
         let mut api = FakeApi::new().route("/user", 500, json!({}));
-        assert_eq!(api.fetch(), FetchResult::Transient);
+        assert_eq!(
+            api.fetch(),
+            FetchResult::Transient(RequestFailure::because(
+                "/2.0/user",
+                UnavailableReason::HttpStatus { status: 500 }
+            ))
+        );
 
         // A 404 on the account itself skips nothing — it fails the refresh.
         let mut api = FakeApi::new().route("/user", 404, json!({}));
-        assert_eq!(api.fetch(), FetchResult::Transient);
+        assert_eq!(
+            api.fetch(),
+            FetchResult::Transient(RequestFailure::because(
+                "/2.0/user",
+                UnavailableReason::HttpStatus { status: 404 }
+            ))
+        );
 
         let mut api = two_workspace_api();
         api.routes
             .insert(0, (format!("{API_BASE}/workspaces/w1/pullrequests/"), None));
-        assert_eq!(api.fetch(), FetchResult::Transient);
+        assert_eq!(
+            api.fetch(),
+            FetchResult::Transient(RequestFailure::transport(
+                "/2.0/workspaces/{workspace}/pullrequests/{user}",
+                offline_failure()
+            ))
+        );
+
+        let mut api = FakeApi::new()
+            .route("/user/workspaces", 502, json!({}))
+            .route("/user", 200, json!({ "uuid": "{me}" }));
+        assert_eq!(
+            api.fetch(),
+            FetchResult::Transient(RequestFailure::because(
+                "/2.0/user/workspaces",
+                UnavailableReason::HttpStatus { status: 502 }
+            ))
+        );
+    }
+
+    /// Each request kind is named by its own template, with no value of the
+    /// request in it (`bitbucket-pull-requests`: *Failures Are Reported on
+    /// Standard Error*).
+    #[test]
+    fn each_request_is_named_by_its_template() {
+        assert_eq!(Request::User.template(), "/2.0/user");
+        assert_eq!(Request::Workspaces.template(), "/2.0/user/workspaces");
+        assert_eq!(
+            Request::PullRequests.template(),
+            "/2.0/workspaces/{workspace}/pullrequests/{user}"
+        );
     }
 
     #[test]
@@ -1747,17 +2015,23 @@ mod tests {
 
     #[test]
     fn an_unparseable_body_is_unavailable() {
+        let unexpected = |template| {
+            FetchResult::Unavailable(RequestFailure::because(
+                template,
+                UnavailableReason::UnexpectedResponse,
+            ))
+        };
         let mut api = FakeApi::new().route_raw("/user", 200, "<html>maintenance</html>");
-        assert_eq!(api.fetch(), FetchResult::Unavailable);
+        assert_eq!(api.fetch(), unexpected("/2.0/user"));
 
         // A well-formed account with nothing to identify it by.
         let mut api = FakeApi::new().route("/user", 200, json!({ "display_name": "Ada" }));
-        assert_eq!(api.fetch(), FetchResult::Unavailable);
+        assert_eq!(api.fetch(), unexpected("/2.0/user"));
 
         let mut api = FakeApi::new()
             .route("/user/workspaces", 200, json!({ "unexpected": true }))
             .route("/user", 200, json!({ "uuid": "{me}" }));
-        assert_eq!(api.fetch(), FetchResult::Unavailable);
+        assert_eq!(api.fetch(), unexpected("/2.0/user/workspaces"));
 
         let mut api = two_workspace_api();
         api.routes.insert(
@@ -1767,17 +2041,44 @@ mod tests {
                 Some((200, "not json".to_string())),
             ),
         );
-        assert_eq!(api.fetch(), FetchResult::Unavailable);
+        assert_eq!(
+            api.fetch(),
+            unexpected("/2.0/workspaces/{workspace}/pullrequests/{user}")
+        );
     }
 
     #[test]
     fn a_read_verdict_without_a_body_is_unavailable() {
         assert_eq!(
-            body_of(Some(Reply {
-                verdict: Verdict::Read,
-                body: None,
-            })),
-            Err(FetchResult::Unavailable)
+            body_of(
+                Ok(Reply::Status {
+                    status: 200,
+                    verdict: Verdict::Read,
+                }),
+                Request::User
+            ),
+            Err(FetchResult::Unavailable(RequestFailure::because(
+                "/2.0/user",
+                UnavailableReason::UnexpectedResponse
+            )))
+        );
+    }
+
+    /// A 2xx whose body the transport cut short is unavailable, as it always
+    /// was, and says how the transport failed.
+    #[test]
+    fn a_body_that_could_not_be_read_is_unavailable_with_its_transport_failure() {
+        let failure = transport(UnavailableReason::Timeout, "timeout: global");
+        assert_eq!(
+            body_of(Ok(Reply::Unread(failure.clone())), Request::Workspaces),
+            Err(FetchResult::Unavailable(RequestFailure::transport(
+                "/2.0/user/workspaces",
+                failure
+            )))
+        );
+        assert_eq!(
+            body_of(Ok(Reply::Read("{}".to_string())), Request::Workspaces),
+            Ok("{}".to_string())
         );
     }
 
@@ -1802,7 +2103,7 @@ mod tests {
     #[test]
     fn degrade_to_stale_keeps_the_rows_and_flags_them() {
         let ok = ok_state(vec![row(1, 100), row(2, 50)]);
-        let staled = degrade_to_stale(&ok);
+        let staled = degrade_to_stale(&ok, UnavailableReason::Timeout);
         assert_eq!(staled.status, PullRequestsStatus::Ok);
         assert!(staled.stale);
         assert_eq!(staled.pull_requests, ok.pull_requests);
@@ -1811,6 +2112,7 @@ mod tests {
             "rows keep their fetch time"
         );
         assert_eq!(staled.skipped_workspaces, ok.skipped_workspaces);
+        assert_eq!(staled.reason, Some(UnavailableReason::Timeout));
     }
 
     #[test]
@@ -1820,10 +2122,11 @@ mod tests {
             BitbucketPullRequestsState::disabled(),
             BitbucketPullRequestsState::status_only(PullRequestsStatus::Unauthenticated),
         ] {
-            let next = degrade_to_stale(&prev);
+            let next = degrade_to_stale(&prev, UnavailableReason::Dns);
             assert_eq!(next.status, PullRequestsStatus::Unavailable, "{prev:?}");
             assert!(!next.stale);
             assert!(next.pull_requests.is_empty());
+            assert_eq!(next.reason, Some(UnavailableReason::Dns));
         }
     }
 
@@ -1848,6 +2151,7 @@ mod tests {
                 fetched_at_unix: Some(5_000),
                 pull_requests: vec![row(2, 200)],
                 skipped_workspaces: vec!["w9".to_string()],
+                reason: None,
             }
         );
 
@@ -1857,17 +2161,504 @@ mod tests {
             BitbucketPullRequestsState::status_only(PullRequestsStatus::Unauthenticated)
         );
         assert_eq!(
-            next_state(&prev, FetchResult::Unavailable, 5_000),
-            BitbucketPullRequestsState::status_only(PullRequestsStatus::Unavailable)
+            next_state(
+                &prev,
+                FetchResult::Unavailable(
+                    Request::User.failed(UnavailableReason::UnexpectedResponse)
+                ),
+                5_000
+            ),
+            BitbucketPullRequestsState::unavailable(UnavailableReason::UnexpectedResponse)
         );
-        for failure in [
-            FetchResult::Transient,
-            FetchResult::RateLimited { retry_after: None },
+        for (failure, reason) in [
+            (timed_out(), UnavailableReason::Timeout),
+            (
+                FetchResult::RateLimited {
+                    retry_after: None,
+                    failure: Request::Workspaces.failed(UnavailableReason::RateLimited),
+                },
+                UnavailableReason::RateLimited,
+            ),
         ] {
             let next = next_state(&prev, failure, 5_000);
             assert!(next.stale);
             assert_eq!(next.pull_requests, prev.pull_requests);
+            assert_eq!(next.reason, Some(reason));
         }
+    }
+
+    // ------------------------------- `bitbucket-pull-requests`: *Unavailable
+    // and Stale Snapshots Carry a Reason*
+
+    /// *An untrusted certificate is named*.
+    #[test]
+    fn an_untrusted_certificate_is_named() {
+        let mut api = FakeApi::new()
+            .offline("/user")
+            .failing_with(untrusted_certificate());
+        let next = next_state(&BitbucketPullRequestsState::disabled(), api.fetch(), NOW);
+        assert_eq!(
+            next,
+            BitbucketPullRequestsState::unavailable(UnavailableReason::CertificateUntrusted)
+        );
+    }
+
+    /// *A server error carries its status*.
+    #[test]
+    fn a_server_error_carries_its_status() {
+        let mut api = FakeApi::new().route("/user", 503, json!({}));
+        let next = next_state(&BitbucketPullRequestsState::disabled(), api.fetch(), NOW);
+        assert_eq!(next.status, PullRequestsStatus::Unavailable);
+        assert_eq!(
+            next.reason,
+            Some(UnavailableReason::HttpStatus { status: 503 })
+        );
+    }
+
+    /// *A stale snapshot keeps its rows and gains a reason*.
+    #[test]
+    fn a_stale_snapshot_keeps_its_rows_and_gains_a_reason() {
+        let prev = ok_state(vec![row(1, 100), row(2, 50)]);
+        let next = next_state(&prev, timed_out(), NOW);
+        assert_eq!(
+            next,
+            BitbucketPullRequestsState {
+                stale: true,
+                reason: Some(UnavailableReason::Timeout),
+                ..prev
+            }
+        );
+    }
+
+    /// *A changed reason is announced*.
+    #[test]
+    fn a_changed_reason_is_announced() {
+        let watcher = watcher();
+        let mut events = watcher.subscribe();
+        let handle = BitbucketPullRequestsHandle::new();
+        handle.set(BitbucketPullRequestsState::unavailable(
+            UnavailableReason::Dns,
+        ));
+        let result = FakeApi::new()
+            .offline("/user")
+            .failing_with(untrusted_certificate())
+            .fetch();
+        assert!(adopt_refresh(
+            &handle,
+            &watcher,
+            Some(result),
+            None,
+            None,
+            NOW
+        ));
+        assert_eq!(
+            handle.get().reason,
+            Some(UnavailableReason::CertificateUntrusted)
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Ok(CacheEvent::BitbucketPullRequestsUpdated)
+        ));
+        // The same reason again changes nothing and announces nothing.
+        let again = FakeApi::new()
+            .offline("/user")
+            .failing_with(untrusted_certificate())
+            .fetch();
+        assert!(!adopt_refresh(
+            &handle,
+            &watcher,
+            Some(again),
+            None,
+            None,
+            NOW + 120
+        ));
+        assert!(events.try_recv().is_err());
+    }
+
+    /// *Recovery clears the reason*.
+    #[test]
+    fn recovery_clears_the_reason() {
+        let prev = BitbucketPullRequestsState::unavailable(UnavailableReason::Connect);
+        let next = next_state(
+            &prev,
+            FetchResult::Ok {
+                pull_requests: vec![row(1, 100)],
+                skipped_workspaces: Vec::new(),
+                identity: BitbucketActorIdentity::default(),
+            },
+            NOW,
+        );
+        assert_eq!(next.status, PullRequestsStatus::Ok);
+        assert_eq!(next.reason, None);
+        assert_eq!(
+            next_state(&prev, FetchResult::Unauthenticated, NOW).reason,
+            None,
+            "nor does an unauthenticated snapshot carry one"
+        );
+    }
+
+    // ---------------------------------- `bitbucket-pull-requests`: *Failures
+    // Are Reported on Standard Error*
+
+    /// Every line `results`, adopted in order, write.
+    fn lines_of(results: &[FetchResult]) -> Vec<String> {
+        let mut log = FailureLog::default();
+        let mut lines = Vec::new();
+        for result in results {
+            log.observe(result, |line| lines.push(line.to_string()));
+        }
+        lines
+    }
+
+    fn untrusted_user() -> FetchResult {
+        FetchResult::Transient(RequestFailure::transport(
+            "/2.0/user",
+            untrusted_certificate(),
+        ))
+    }
+
+    fn fetched() -> FetchResult {
+        FetchResult::Ok {
+            pull_requests: vec![row(1, 100)],
+            skipped_workspaces: Vec::new(),
+            identity: BitbucketActorIdentity::default(),
+        }
+    }
+
+    /// *The first failure is reported once*.
+    #[test]
+    fn the_first_failure_is_reported_once() {
+        assert_eq!(
+            lines_of(&[untrusted_user(), untrusted_user(), untrusted_user()]),
+            [
+                "specforge: bitbucket: GET /2.0/user failed: certificate not trusted \
+              (invalid peer certificate: UnknownIssuer)"
+            ]
+        );
+    }
+
+    /// *Recovery is reported* — once, and only after a failure.
+    #[test]
+    fn recovery_is_reported() {
+        assert_eq!(
+            lines_of(&[untrusted_user(), fetched(), fetched()]),
+            [
+                "specforge: bitbucket: GET /2.0/user failed: certificate not trusted \
+                 (invalid peer certificate: UnknownIssuer)",
+                "specforge: bitbucket: recovered",
+            ]
+        );
+        assert!(lines_of(&[fetched(), fetched()]).is_empty());
+        assert!(lines_of(&[FetchResult::Unauthenticated, fetched()]).is_empty());
+    }
+
+    /// A new reason is a new line, whatever request it failed on; the same
+    /// reason on another request is not.
+    #[test]
+    fn a_changed_reason_writes_a_new_line() {
+        let dns = FetchResult::Transient(RequestFailure::transport(
+            "/2.0/user",
+            transport(
+                UnavailableReason::Dns,
+                "failed to lookup address information: Temporary failure in name resolution",
+            ),
+        ));
+        let lines = lines_of(&[dns, untrusted_user(), timed_out()]);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].ends_with("failed: host name did not resolve (failed to lookup address information: Temporary failure in name resolution)"));
+        assert!(lines[1].contains("certificate not trusted"));
+        assert!(lines[2].ends_with("failed: timeout (timeout: global)"));
+
+        let elsewhere = FetchResult::Transient(RequestFailure::transport(
+            "/2.0/user/workspaces",
+            untrusted_certificate(),
+        ));
+        assert_eq!(lines_of(&[untrusted_user(), elsewhere]).len(), 1);
+    }
+
+    /// An unauthenticated refresh writes nothing and carries no reason, so the
+    /// failure after it is reported anew.
+    #[test]
+    fn an_unauthenticated_refresh_ends_a_failure_silently() {
+        let lines = lines_of(&[
+            untrusted_user(),
+            FetchResult::Unauthenticated,
+            untrusted_user(),
+        ]);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], lines[1]);
+    }
+
+    /// *A line carries no identifiers or secrets* — the listing of workspace
+    /// `acme` answers 500 with a body, under a credential: the line names the
+    /// template and the status, and nothing of the workspace, the account,
+    /// the credential or the reply.
+    #[test]
+    fn a_line_carries_no_identifiers_or_secrets() {
+        let (username, token) = ("ada-lovelace", "ATBB-secret-token");
+        let mut api = FakeApi::new()
+            .route(
+                "/user/workspaces",
+                200,
+                json!({ "values": [{ "workspace": { "slug": "acme" } }] }),
+            )
+            .route(
+                "/user",
+                200,
+                json!({ "uuid": "{me-uuid}", "account_id": "me-account" }),
+            )
+            .route_raw(
+                "/workspaces/acme/pullrequests/",
+                500,
+                "Internal error for ada-lovelace in acme",
+            );
+        let result = api.fetch();
+        assert_eq!(
+            result,
+            FetchResult::Transient(RequestFailure::because(
+                "/2.0/workspaces/{workspace}/pullrequests/{user}",
+                UnavailableReason::HttpStatus { status: 500 }
+            ))
+        );
+        let lines = lines_of(&[result]);
+        assert_eq!(
+            lines,
+            [
+                "specforge: bitbucket: GET /2.0/workspaces/{workspace}/pullrequests/{user} \
+              failed: HTTP 500"
+            ]
+        );
+        for secret in [
+            "acme",
+            "me-uuid",
+            "me-account",
+            username,
+            token,
+            "Internal error",
+            "?",
+        ] {
+            assert!(!lines[0].contains(secret), "{secret} in {}", lines[0]);
+        }
+    }
+
+    /// `send`'s reading of what came back: a 2xx's body, any other status
+    /// and its verdict, a body the transport cut short, or no reply at all.
+    #[test]
+    fn a_reply_is_read_into_what_the_recipe_needs() {
+        use crate::usage_http::test_response;
+
+        assert_eq!(
+            read_reply(Ok(test_response(200, &[], "{\"uuid\":\"{me}\"}"))),
+            Ok(Reply::Read("{\"uuid\":\"{me}\"}".to_string()))
+        );
+        assert_eq!(
+            read_reply(Ok(test_response(429, &[("Retry-After", "30")], "slow"))),
+            Ok(Reply::Status {
+                status: 429,
+                verdict: Verdict::RateLimited {
+                    retry_after: Some(30)
+                },
+            })
+        );
+        assert_eq!(
+            read_reply(Ok(test_response(503, &[], "down"))),
+            Ok(Reply::Status {
+                status: 503,
+                verdict: Verdict::Transient,
+            })
+        );
+        assert_eq!(
+            read_reply(Err(ureq::Error::HostNotFound)),
+            Err(transport(UnavailableReason::Dns, "host not found"))
+        );
+
+        struct Stalled;
+        impl std::io::Read for Stalled {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            }
+        }
+        let cut_short = ureq::http::Response::builder()
+            .status(200)
+            .body(ureq::Body::builder().reader(Stalled))
+            .unwrap();
+        assert_eq!(
+            read_reply(Ok(cut_short)),
+            Ok(Reply::Unread(transport(
+                UnavailableReason::Timeout,
+                "timed out"
+            )))
+        );
+    }
+
+    /// Waits for one connection on `listener`, which is non-blocking, so a
+    /// client that never connects fails the test instead of hanging it.
+    fn accept_within(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("no connection arrived: {error}"),
+            }
+        }
+    }
+
+    /// A loopback stand-in for api.bitbucket.org over TLS, presenting
+    /// `identity` to `connections` connections in turn, one request each, and
+    /// answering as BitBucket does for an account in the one workspace `acme`
+    /// with one open pull request, #7. Hands back each connection's request
+    /// line, or `None` where the client refused the handshake.
+    fn serve_bitbucket(
+        identity: crate::trust_roots::fixtures::Identity,
+        connections: usize,
+    ) -> (u16, std::thread::JoinHandle<Vec<Option<String>>>) {
+        use std::io::{Read, Write};
+
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(identity.chain, identity.key)
+            .unwrap(),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            (0..connections)
+                .map(|_| {
+                    let stream = accept_within(&listener);
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(20)))
+                        .unwrap();
+                    let connection = rustls::ServerConnection::new(config.clone()).unwrap();
+                    let mut tls = rustls::StreamOwned::new(connection, stream);
+                    let mut head = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !head.windows(4).any(|end| end == b"\r\n\r\n") {
+                        match tls.read(&mut buf) {
+                            Ok(0) | Err(_) => return None,
+                            Ok(read) => head.extend_from_slice(&buf[..read]),
+                        }
+                    }
+                    let line = String::from_utf8(head)
+                        .unwrap()
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_string();
+                    let path = line.split(' ').nth(1).unwrap_or_default();
+                    let body = if path == "/2.0/user" {
+                        json!({ "uuid": "{me}" })
+                    } else if path.starts_with("/2.0/user/workspaces") {
+                        json!({ "values": [{ "workspace": { "slug": "acme" } }] })
+                    } else {
+                        a_page(vec![a_pr(7, "2026-09-01T10:00:00+00:00")])
+                    }
+                    .to_string();
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    tls.write_all(reply.as_bytes()).unwrap();
+                    tls.conn.send_close_notify();
+                    let _ = tls.flush();
+                    Some(line)
+                })
+                .collect()
+        });
+        (port, server)
+    }
+
+    /// Task 5.3's smoke, automated, since this session cannot route
+    /// api.bitbucket.org to a local server without root or a hosts-file edit:
+    /// the poller's request chain, read by `read_reply` over the poller's own
+    /// transport, against a loopback stand-in. Behind a chain to a root this
+    /// process does not trust, three refreshes leave the snapshot unavailable
+    /// with `certificateUntrusted` and write one line, and no request is sent
+    /// over the chain. Once the stand-in presents a chain to the root the
+    /// trust store holds, as `SSL_CERT_FILE` would add it, the next refresh
+    /// lists the row, clears the reason and writes that BitBucket recovered.
+    #[test]
+    fn a_poller_behind_an_untrusted_root_says_so_once_and_recovers() {
+        use crate::trust_roots::fixtures::{certificate, localhost, roots_with, self_signed, CA};
+
+        let agent = usage_http::following_agent_trusting(roots_with(vec![certificate(CA)]));
+        let refresh_on = |port: u16| {
+            fetch_snapshot_with(|url| {
+                let local = url.replacen(API_BASE, &format!("https://127.0.0.1:{port}/2.0"), 1);
+                read_reply(
+                    agent
+                        .get(&local)
+                        .header("Accept", "application/json")
+                        .call(),
+                )
+            })
+        };
+        let mut log = FailureLog::default();
+        let mut lines = Vec::new();
+        let mut state = BitbucketPullRequestsState::disabled();
+
+        let (port, server) = serve_bitbucket(self_signed(), 3);
+        for _ in 0..3 {
+            let result = refresh_on(port);
+            log.observe(&result, |line| lines.push(line.to_string()));
+            state = next_state(&state, result, NOW);
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            [None, None, None],
+            "no request is sent over an untrusted chain"
+        );
+        assert_eq!(
+            state,
+            BitbucketPullRequestsState::unavailable(UnavailableReason::CertificateUntrusted)
+        );
+        assert_eq!(
+            lines,
+            [
+                "specforge: bitbucket: GET /2.0/user failed: certificate not trusted \
+              (invalid peer certificate: UnknownIssuer)"
+            ]
+        );
+
+        let (port, server) = serve_bitbucket(localhost(), 3);
+        let result = refresh_on(port);
+        log.observe(&result, |line| lines.push(line.to_string()));
+        state = next_state(&state, result, NOW);
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0].as_deref(), Some("GET /2.0/user HTTP/1.1"));
+        assert!(requests[1]
+            .as_deref()
+            .is_some_and(|line| line.starts_with("GET /2.0/user/workspaces?")));
+        assert!(requests[2]
+            .as_deref()
+            .is_some_and(|line| line.starts_with("GET /2.0/workspaces/acme/pullrequests/")));
+        assert_eq!(state.status, PullRequestsStatus::Ok);
+        assert_eq!(state.reason, None);
+        assert_eq!(
+            state
+                .pull_requests
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [7]
+        );
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1], "specforge: bitbucket: recovered");
     }
 
     #[test]
@@ -1899,9 +2690,25 @@ mod tests {
             skipped_workspaces: Vec::new(),
             ..prev.clone()
         };
-        for next in [changed_rows, changed_stale, changed_status, changed_skips] {
+        let changed_reason = BitbucketPullRequestsState {
+            reason: Some(UnavailableReason::Timeout),
+            ..prev.clone()
+        };
+        for next in [
+            changed_rows,
+            changed_stale,
+            changed_status,
+            changed_skips,
+            changed_reason,
+        ] {
             assert!(is_news(&prev, &next), "{next:?}");
         }
+        // One reason for another is news too.
+        let dns = BitbucketPullRequestsState::unavailable(UnavailableReason::Dns);
+        let untrusted =
+            BitbucketPullRequestsState::unavailable(UnavailableReason::CertificateUntrusted);
+        assert!(is_news(&dns, &untrusted));
+        assert!(!is_news(&dns, &dns.clone()));
     }
 
     // ------------------------------------------- the credential and identity context
@@ -1992,7 +2799,7 @@ mod tests {
         adopt_refresh(
             &handle,
             &watcher,
-            Some(FetchResult::Transient),
+            Some(timed_out()),
             Some(legacy_context("beatrice", "tok-b")),
             Some(identity_of("{u-2}", "Beatrice")),
             NOW + 1,
@@ -2090,7 +2897,9 @@ mod tests {
         adopt_refresh(
             &handle,
             &watcher,
-            Some(FetchResult::Unavailable),
+            Some(FetchResult::Unavailable(
+                Request::User.failed(UnavailableReason::UnexpectedResponse),
+            )),
             Some(legacy_context("ada", "tok-a")),
             None,
             NOW,
@@ -2362,7 +3171,7 @@ mod tests {
         let mut api = FakeApi::new()
             .route("/user/workspaces", 429, json!({}))
             .route("/user", 200, json!({ "uuid": "{me}" }));
-        let FetchResult::RateLimited { retry_after } = api.fetch() else {
+        let FetchResult::RateLimited { retry_after, .. } = api.fetch() else {
             panic!("the poller's 429 is a rate limit");
         };
         limits.rate_limited(retry_after, NOW);
@@ -2436,8 +3245,9 @@ mod tests {
         ));
         assert_eq!(
             handle.get(),
-            BitbucketPullRequestsState::status_only(PullRequestsStatus::Unavailable)
+            BitbucketPullRequestsState::unavailable(UnavailableReason::RateLimited)
         );
+        assert_eq!(handle.get().reason, Some(UnavailableReason::RateLimited));
         assert!(announced(&mut events));
         // Published once: the next tick inside the deadline changes nothing.
         assert!(!publish_held_unavailable(
@@ -2488,10 +3298,7 @@ mod tests {
             |url| {
                 requested.push(url.to_string());
                 detail_reply(&limits, 429, None);
-                Some(Reply {
-                    verdict: Verdict::Read,
-                    body: Some(json!({ "uuid": "{me}" }).to_string()),
-                })
+                Ok(Reply::Read(json!({ "uuid": "{me}" }).to_string()))
             },
             || !limits.holds_poller(NOW),
         );
@@ -2513,10 +3320,7 @@ mod tests {
                     .iter()
                     .find(|(prefix, _)| url.starts_with(prefix.as_str()))
                     .unwrap();
-                let (status, body) = reply.clone()?;
-                let verdict = classify(status, None);
-                let body = (verdict == Verdict::Read).then_some(body);
-                Some(Reply { verdict, body })
+                scripted(reply.clone(), &offline_failure())
             },
             || true,
         );
@@ -2659,7 +3463,7 @@ mod tests {
         // A stale snapshot answers nothing; then so does one read under no
         // credential at all.
         handle.set_with_context(
-            degrade_to_stale(&handle.get()),
+            degrade_to_stale(&handle.get(), UnavailableReason::Timeout),
             Some(credential.clone()),
             Some(identity_of_uuid("bb-uuid-1")),
         );

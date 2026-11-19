@@ -23,6 +23,7 @@ import type {
     PullRequestProvider,
     PullRequestSummary,
     ReviewSummary,
+    UnavailableReason,
 } from "../types"
 import { ChevronDown, ChevronRight, CommentIcon } from "./icons"
 import { PullRequestControl } from "./PullRequestControl"
@@ -143,6 +144,54 @@ export const PANEL_MESSAGES: Record<
     },
 }
 
+/// Why BitBucket is unavailable, in words that finish "BitBucket is
+/// unavailable: …" (`bitbucket-pull-requests`: *Unavailable and Stale
+/// Snapshots Carry a Reason*). An untrusted certificate points at the two
+/// places a root CA can be added.
+export function unavailableReasonText(reason: UnavailableReason): string {
+    switch (reason.kind) {
+        case "certificateUntrusted":
+            return (
+                "this machine does not trust the server's certificate. Add your " +
+                "organisation's root CA to the system store or SSL_CERT_FILE."
+            )
+        case "tls":
+            return "the secure connection could not be set up."
+        case "dns":
+            return "the host name api.bitbucket.org did not resolve."
+        case "connect":
+            return "the connection was refused, reset or unreachable."
+        case "timeout":
+            return "the request timed out."
+        case "httpStatus":
+            return `it answered HTTP ${reason.status}.`
+        case "unexpectedResponse":
+            return "its reply could not be read."
+        case "rateLimited":
+            return "too many requests, so SpecForge waits before asking again."
+    }
+}
+
+/// How a root CA reaches the system store where most such machines need it:
+/// the tooltip's hint beside an untrusted certificate.
+export const CERTIFICATE_HINT =
+    "On Linux and WSL, update-ca-certificates adds a root CA to the system " +
+    "store; SSL_CERT_FILE can instead name a PEM file that holds it."
+
+/// The one quiet line a non-row body shows. BitBucket's unavailable line
+/// states the snapshot's reason when it carries one, and keeps today's line
+/// when it does not; every other line, GitHub's included, is
+/// `PANEL_MESSAGES`'.
+export function panelMessage(
+    panel: PanelSnapshot,
+    body: Exclude<PanelBodyState, "rows">,
+): string {
+    if (panel.provider === "bitbucket" && body === "unavailable" && panel.snapshot.reason) {
+        return `BitBucket is unavailable: ${unavailableReasonText(panel.snapshot.reason)}`
+    }
+    return PANEL_MESSAGES[panel.provider][body]
+}
+
 /// The header's count: the number of rows for BitBucket, and `yours · to
 /// review` for GitHub — shown only while there is a list (`ok`, stale or
 /// not), so a collapsed panel still carries its counts. `label` says the same
@@ -217,13 +266,22 @@ export function nextRelabelDelayMs(
 
 /// The header's tooltip. What the panel could not list — BitBucket's skipped
 /// workspaces, GitHub's withheld results — is visible here, on request, and
-/// never rendered as an error; a stale list says why it is de-emphasised.
+/// never rendered as an error; a stale list says why it is de-emphasised,
+/// with BitBucket's reason when the snapshot carries one, and an untrusted
+/// certificate adds how a root CA is added.
 export function panelHeaderTitle(panel: PanelSnapshot): string {
     if (panel.provider === "bitbucket") {
         const { snapshot } = panel
         const lines = ["Your open BitBucket pull requests"]
         if (snapshot.stale) {
-            lines.push("Showing the last list — BitBucket could not be reached.")
+            lines.push(
+                snapshot.reason
+                    ? `Showing the last list — BitBucket is unavailable: ${unavailableReasonText(snapshot.reason)}`
+                    : "Showing the last list — BitBucket could not be reached.",
+            )
+        }
+        if (snapshot.reason?.kind === "certificateUntrusted") {
+            lines.push(CERTIFICATE_HINT)
         }
         if (snapshot.skippedWorkspaces.length > 0) {
             lines.push(`Skipped (no access): ${snapshot.skippedWorkspaces.join(", ")}`)
@@ -521,7 +579,7 @@ export function PullRequestPanel({
                     </div>
                 ) : (
                     <p className="pull-request-panel-message">
-                        {PANEL_MESSAGES[provider][body]}
+                        {panelMessage(panel, body)}
                     </p>
                 ))}
         </section>

@@ -314,6 +314,10 @@ impl Connector for PublicConnectionGuard {
     }
 }
 
+/// The agent for one image read. Its TLS config trusts the same root set as
+/// the provider transport (`outbound-https-trust`: *The image transport uses
+/// the same roots*) with verification on; every other rule of this transport
+/// is the guard's and the resolver's.
 fn pinned_agent(target: &PinnedTarget, remaining: Duration, connector: impl Connector) -> Agent {
     let config = Agent::config_builder()
         .timeout_global(Some(remaining))
@@ -324,6 +328,7 @@ fn pinned_agent(target: &PinnedTarget, remaining: Duration, connector: impl Conn
         .max_idle_connections_per_host(0)
         .tls_config(
             ureq::tls::TlsConfig::builder()
+                .root_certs(crate::trust_roots::root_certs())
                 .disable_verification(false)
                 .build(),
         )
@@ -1166,6 +1171,15 @@ mod transport_tests {
             assert_eq!(details.uri.host(), Some("images.example"));
             assert!(details.config.proxy().is_none());
             assert!(!details.config.tls_config().disable_verification());
+            // `outbound-https-trust`: *The image transport uses the same
+            // roots* as the provider transport, the process's one set.
+            let (ureq::tls::RootCerts::Specific(roots), ureq::tls::RootCerts::Specific(shared)) = (
+                details.config.tls_config().root_certs(),
+                crate::trust_roots::root_certs(),
+            ) else {
+                panic!("specific roots");
+            };
+            assert!(Arc::ptr_eq(roots, &shared));
             assert_eq!(details.config.max_redirects(), 0);
             assert_eq!(details.config.max_idle_connections(), 0);
             assert_eq!(details.config.max_idle_connections_per_host(), 0);
@@ -1351,6 +1365,7 @@ mod transport_tests {
                 .max_redirects(if case == "redirect" { 1 } else { 0 })
                 .tls_config(
                     ureq::tls::TlsConfig::builder()
+                        .root_certs(crate::trust_roots::root_certs())
                         .disable_verification(case == "tls")
                         .build(),
                 )

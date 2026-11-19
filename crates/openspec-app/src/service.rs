@@ -9724,6 +9724,7 @@ mod tests {
             fetched_at_unix: Some(1_700_000_000),
             pull_requests: rows(urls),
             skipped_workspaces: Vec::new(),
+            reason: None,
         }
     }
 
@@ -10453,6 +10454,7 @@ mod tests {
                 fetched_at_unix: Some(READ_AT),
                 pull_requests: rows,
                 skipped_workspaces: Vec::new(),
+                reason: None,
             }),
         }
     }
@@ -10938,6 +10940,42 @@ mod tests {
             ("acme", "api")
         );
         assert_eq!(read.head_commit, fake::HEAD);
+    }
+
+    /// `bitbucket-pull-requests`: *A failed detail read is reported* — a read
+    /// whose request times out writes one line to standard error, through the
+    /// read's I/O, naming the pull request by its template; a read that
+    /// succeeds writes none.
+    #[tokio::test]
+    async fn a_failed_bitbucket_detail_read_writes_one_line() {
+        let web = pull_request(Bitbucket, "acme", "web", 7);
+        let (_cfg, svc, io) = serving(
+            Bitbucket,
+            vec![listed_pull_request(Bitbucket, "acme/web", 7)],
+        );
+        detail(ask(&svc, &web, false, false, &io).await);
+        assert!(io.reported().is_empty(), "{:?}", io.reported());
+
+        let (_cfg, svc, io) = serving(
+            Bitbucket,
+            vec![listed_pull_request(Bitbucket, "acme/web", 7)],
+        );
+        io.fail_bitbucket(crate::usage_http::TransportFailure {
+            reason: crate::usage_http::UnavailableReason::Timeout,
+            message: Some("timeout: global".to_string()),
+        });
+        assert_eq!(
+            ask(&svc, &web, false, false, &io).await,
+            PullRequestDetailOutcome::Transient
+        );
+        assert_eq!(io.requests().len(), 1, "the read stops at its failure");
+        assert_eq!(
+            io.reported(),
+            [
+                "specforge: bitbucket: GET /2.0/repositories/{workspace}/{repo}/pullrequests/{id} \
+              failed: timeout (timeout: global)"
+            ]
+        );
     }
 
     /// `pull-request-viewer`: *A disabled provider serves nothing*: its
@@ -13494,6 +13532,7 @@ mod tests {
                     fetched_at_unix: Some(1_000),
                     pull_requests: vec![row(7)],
                     skipped_workspaces: Vec::new(),
+                    reason: None,
                 },
                 Some(bitbucket_context),
                 Some(crate::bitbucket::BitbucketActorIdentity::of_uuid(
@@ -16708,6 +16747,7 @@ mod tests {
                     fetched_at_unix: Some(1_000),
                     pull_requests: vec![row(7)],
                     skipped_workspaces: Vec::new(),
+                    reason: None,
                 },
                 Some(context.clone()),
                 Some(crate::bitbucket::BitbucketActorIdentity::of_uuid(

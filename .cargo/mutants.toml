@@ -87,14 +87,25 @@ exclude_re = [
     # from a test. The function's other mutants stay in scope.
     "delete ! in Store::try_lease",
 
+    # crates/openspec-app/src/trust_roots.rs — `report` only writes the root
+    # set's one line to stderr, unless the terminal frontend silenced it.
+    # Emptying it, or deleting its `!`, changes nothing but what reaches
+    # stderr, which a test cannot observe. What it writes is tested through
+    # the sink `TrustRoots::get` takes (`RootSet::line`, built and reported
+    # once), and so is the switch (`silencing_the_report_lasts`).
+    "trust_roots\\.rs.*replace report with \\(\\)",
+    "trust_roots\\.rs.*delete ! in report$",
+
     # crates/openspec-app/src/bitbucket.rs — the three functions a unit test
     # cannot drive: `send` is the one real HTTPS request (every decision it
     # feeds is made in `fetch_snapshot_with`, which is tested over an injected
-    # `get`), `now_unix` is the wall clock (`next_state` takes the instant as
-    # an argument and is tested), and `run_poller` never returns (its steps —
-    # `refresh_due`, `refresh_interval`, `backoff`, `next_state`, `is_news`,
-    # `degrade_to_stale` — are each pure and tested). Mutating these measures
-    # the glue, not the product.
+    # `get`, and the reply it gets is read by `read_reply`, tested on built
+    # responses and over loopback TLS), `now_unix` is the wall clock
+    # (`next_state` takes the instant as an argument and is tested), and
+    # `run_poller` never returns (its steps — `refresh_due`,
+    # `refresh_interval`, `backoff`, `next_state`, `is_news`,
+    # `degrade_to_stale`, `FailureLog::observe` — are each pure and tested).
+    # Mutating these measures the glue, not the product.
     "bitbucket.rs.*\\b(send|now_unix|run_poller|spawn_poller)\\b",
 
     # crates/openspec-app/src/github.rs — its structural twin, excluded for the

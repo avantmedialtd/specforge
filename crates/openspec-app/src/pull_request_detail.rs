@@ -918,6 +918,7 @@ mod tests {
             fetched_at_unix: Some(1_700_000_000),
             pull_requests,
             skipped_workspaces: Vec::new(),
+            reason: None,
         }
     }
 

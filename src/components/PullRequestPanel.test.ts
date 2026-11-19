@@ -8,6 +8,7 @@ import {
     onGithubPullRequestsUpdated,
 } from "../api"
 import {
+    CERTIFICATE_HINT,
     checksLabel,
     COLLAPSED_KEYS,
     conversationsLabel,
@@ -18,6 +19,7 @@ import {
     PANEL_TITLES,
     panelBodyState,
     panelHeaderTitle,
+    panelMessage,
     panelPresent,
     panelRows,
     panelSections,
@@ -34,6 +36,7 @@ import type {
     BitbucketPullRequestsState,
     GithubPullRequestsState,
     PullRequestSummary,
+    UnavailableReason,
 } from "../types"
 
 const NOW_MS = Date.UTC(2026, 8, 22, 12, 0, 0)
@@ -96,6 +99,7 @@ function bitbucket(overrides: Partial<BitbucketPullRequestsState> = {}): PanelSn
             fetchedAtUnix: NOW_S,
             pullRequests: [row()],
             skippedWorkspaces: [],
+            reason: null,
             ...overrides,
         },
     }
@@ -409,6 +413,87 @@ describe("panelHeaderTitle", () => {
 
     test("a single withheld result reads in the singular", () => {
         expect(panelHeaderTitle(github({ withheld: 1 }))).toContain("1 result withheld")
+    })
+})
+
+// `bitbucket-pull-requests`: *Unavailable and Stale Snapshots Carry a Reason*.
+describe("unavailable reasons", () => {
+    function unavailable(reason: UnavailableReason | null): PanelSnapshot {
+        return bitbucket({ status: "unavailable", fetchedAtUnix: null, pullRequests: [], reason })
+    }
+
+    test("an untrusted certificate says this machine does not trust it, and where a root goes", () => {
+        expect(panelMessage(unavailable({ kind: "certificateUntrusted" }), "unavailable")).toBe(
+            "BitBucket is unavailable: this machine does not trust the server's certificate. " +
+                "Add your organisation's root CA to the system store or SSL_CERT_FILE.",
+        )
+    })
+
+    test("each other reason has its own words", () => {
+        const cases: [UnavailableReason, string][] = [
+            [{ kind: "tls" }, "the secure connection could not be set up."],
+            [{ kind: "dns" }, "the host name api.bitbucket.org did not resolve."],
+            [{ kind: "connect" }, "the connection was refused, reset or unreachable."],
+            [{ kind: "timeout" }, "the request timed out."],
+            [{ kind: "httpStatus", status: 503 }, "it answered HTTP 503."],
+            [{ kind: "unexpectedResponse" }, "its reply could not be read."],
+            [{ kind: "rateLimited" }, "too many requests, so SpecForge waits before asking again."],
+        ]
+        for (const [reason, words] of cases) {
+            expect(panelMessage(unavailable(reason), "unavailable")).toBe(
+                `BitBucket is unavailable: ${words}`,
+            )
+        }
+    })
+
+    test("an unavailable snapshot without a reason keeps today's line", () => {
+        expect(panelMessage(unavailable(null), "unavailable")).toBe(
+            "BitBucket is unavailable right now.",
+        )
+    })
+
+    test("GitHub's lines, and BitBucket's other lines, are unchanged", () => {
+        expect(
+            panelMessage(github({ status: "unavailable", authored: [], reviewRequested: [] }), "unavailable"),
+        ).toBe("GitHub is unavailable right now.")
+        expect(
+            panelMessage(bitbucket({ status: "unauthenticated", pullRequests: [] }), "unauthenticated"),
+        ).toBe(PANEL_MESSAGES.bitbucket.unauthenticated)
+        expect(panelMessage(bitbucket({ pullRequests: [] }), "empty")).toBe("No open pull requests.")
+    })
+
+    test("the unavailable panel renders the reasoned line", () => {
+        const html = renderToStaticMarkup(
+            createElement(PullRequestPanel, {
+                provider: "bitbucket",
+                panel: unavailable({ kind: "timeout" }),
+                onOpenPullRequest() {},
+            }),
+        )
+        expect(html).toContain("BitBucket is unavailable: the request timed out.")
+        expect(html).not.toContain("right now")
+    })
+
+    test("a stale snapshot keeps its rows and shows its reason on request", () => {
+        const stale = bitbucket({ stale: true, reason: { kind: "timeout" } })
+        expect(panelBodyState(stale)).toBe("rows")
+        const title = panelHeaderTitle(stale)
+        expect(title).toContain(
+            "Showing the last list — BitBucket is unavailable: the request timed out.",
+        )
+        expect(title).not.toContain("could not be reached")
+        expect(title).not.toContain("update-ca-certificates")
+    })
+
+    test("an untrusted certificate's tooltip says how a root CA is added", () => {
+        const stale = panelHeaderTitle(bitbucket({ stale: true, reason: { kind: "certificateUntrusted" } }))
+        expect(stale).toContain("does not trust the server's certificate")
+        expect(stale).toContain(CERTIFICATE_HINT)
+        expect(CERTIFICATE_HINT).toContain("update-ca-certificates")
+        expect(panelHeaderTitle(unavailable({ kind: "certificateUntrusted" }))).toContain(
+            CERTIFICATE_HINT,
+        )
+        expect(panelHeaderTitle(unavailable({ kind: "dns" }))).not.toContain(CERTIFICATE_HINT)
     })
 })
 

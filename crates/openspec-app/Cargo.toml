@@ -30,6 +30,30 @@ dirs = "6"
 # The credentialless image connector uses ureq's explicitly unversioned
 # resolver/transport API. Pin its reviewed implementation until re-audited.
 ureq = "=3.4.0"
+# The system half of the root set every HTTPS client trusts
+# (`crate::trust_roots`, `outbound-https-trust`): the operating system's
+# trusted roots, honouring SSL_CERT_FILE and SSL_CERT_DIR, so a corporate root
+# CA that re-signs api.bitbucket.org is trusted wherever curl and git trust it.
+# One of the change's two new downloads, with its per-platform store readers:
+# openssl-probe on Linux only looks for the usual bundle paths and links
+# nothing, so the static musl `specforge-serve` build still holds;
+# security-framework on macOS (already locked through keyring) and schannel on
+# Windows reach only the system frameworks.
+rustls-native-certs = "0.8.5"
+# The Mozilla half of that root set, as whole DER certificates, which is what
+# ureq takes as specific roots: the `webpki-roots` set ureq trusts by default
+# ships only as trust anchors. The same project and the same Mozilla data,
+# pinned to the `webpki-roots` version ureq locks, so the bundled set is the one
+# ureq trusted before. The change's other new download: pure data on
+# `rustls-pki-types`, which is already locked, so the musl build still holds.
+webpki-root-certs = "=1.0.9"
+# rustls itself, at ureq's version, for two reads ureq does not offer: the TLS
+# error inside a failed request (a rejected certificate arrives wrapped in an
+# `io::Error`), and whether a system root parses at all. Already resolved in
+# Cargo.lock; `std` is a feature ureq already turns on, and the defaults stay
+# off, since they would pull in aws-lc-rs, a C build the zig musl cross-build
+# does not carry.
+rustls = { version = "0.23.43", default-features = false, features = ["std"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Single-decode of a markdown link href before it's resolved against the
 # authorized root (`AppService::open_artifact_link`). Already resolved in
@@ -82,6 +106,11 @@ flate2 = "1"
 # code here uses it. Already resolved in Cargo.lock as `openspec-core`'s edge,
 # so this adds no new download.
 tempfile = "3"
+# The loopback TLS server the trust tests connect to needs rustls's server
+# side and a crypto provider. `ring` is the provider ureq already turns on, so
+# naming it here adds no new feature or download; it only stops the tests from
+# leaning on another crate's feature choice.
+rustls = { version = "0.23.43", default-features = false, features = ["std", "ring"] }
 
 [lints]
 workspace = true

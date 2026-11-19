@@ -95,6 +95,7 @@ describe("withProviderChange", () => {
                     fetchedAtUnix: null,
                     pullRequests: [],
                     skippedWorkspaces: [],
+                    reason: null,
                 },
             },
         }

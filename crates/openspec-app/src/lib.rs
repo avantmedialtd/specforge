@@ -36,6 +36,7 @@ pub mod review_progress;
 pub mod review_skip;
 pub mod service;
 pub mod settings;
+pub mod trust_roots;
 pub(crate) mod usage_http;
 pub mod window_title;
 
@@ -90,4 +91,5 @@ pub use settings::{
     TailscaleConfig, Theme, WebServerConfig, PULL_REQUEST_WINDOW_MIN_HEIGHT,
     PULL_REQUEST_WINDOW_MIN_WIDTH,
 };
+pub use usage_http::UnavailableReason;
 pub use window_title::{sanitize_window_title, WINDOW_TITLE_CAP};

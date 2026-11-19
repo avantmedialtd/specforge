@@ -32,6 +32,13 @@
 //! The recipe runs over an injected transport and asks, before each request,
 //! whether it may still send, as `crate::github_detail` does. No outcome
 //! carries the text of a reply it failed on.
+//!
+//! A read that fails on a request reports it once, through the caller's
+//! `report`, to standard error (`bitbucket-pull-requests`: *Failures Are
+//! Reported on Standard Error*): the request by its path template, never its
+//! URL, why it failed, and, for a transport failure, the TLS or I/O error's
+//! own message. A read stopped between requests, or held back before one,
+//! did not fail on a request and reports nothing.
 
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -50,7 +57,7 @@ use crate::pull_request_detail::{
 use crate::pull_request_limits::Deadlines;
 use crate::pull_requests::saturating_u32;
 use crate::quota::parse_rfc3339_to_unix;
-use crate::usage_http::{self, Auth, Verdict};
+use crate::usage_http::{self, Auth, RequestFailure, TransportFailure, UnavailableReason, Verdict};
 
 /// How much of a pull request's diff a read takes. Every file past it is too
 /// large to preview, with its diffstat's status, rename and counts.
@@ -66,6 +73,16 @@ const FOLLOWABLE_ROOT: &str = "https://api.bitbucket.org/2.0/";
 /// Where a comment's web page may live. Only a link on BitBucket's own site
 /// survives into the model, as only one does into a row.
 const WEB_URL_PREFIX: &str = "https://bitbucket.org/";
+
+// What a failed read's line names each of its requests by: the path as a
+// template, with `{workspace}`, `{repo}`, `{id}` and the diff spec in place of
+// the values (`bitbucket-pull-requests`: *Failures Are Reported on Standard
+// Error*). A payload link's or a page's own URL never reaches the line.
+const PULL_REQUEST_PATH: &str = "/2.0/repositories/{workspace}/{repo}/pullrequests/{id}";
+const DIFFSTAT_PATH: &str = "/2.0/repositories/{workspace}/{repo}/diffstat/{spec}";
+const DIFF_PATH: &str = "/2.0/repositories/{workspace}/{repo}/diff/{spec}";
+const COMMENTS_PATH: &str = "/2.0/repositories/{workspace}/{repo}/pullrequests/{id}/comments";
+const STATUSES_PATH: &str = "/2.0/repositories/{workspace}/{repo}/pullrequests/{id}/statuses";
 
 /// What one GET reads: a JSON page, the diff's text, or a file's raw bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +116,7 @@ impl Body {
 
 /// One reply, reduced to what the read reads off it: its status, its
 /// `Retry-After`, and for a 2xx its body, as received, up to its limit. A
-/// transport error is no reply.
+/// transport error is no reply, but the [`TransportFailure`] that says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Reply {
     pub(crate) status: u16,
@@ -109,8 +126,11 @@ pub(crate) struct Reply {
 
 impl Reply {
     /// Reads a response into a reply, its body only for a 2xx and only up to
-    /// `body`'s limit. `None` when the body cannot be read: a transport error.
-    pub(crate) fn read(mut response: ureq::http::Response<ureq::Body>, body: Body) -> Option<Self> {
+    /// `body`'s limit. A body that cannot be read is a transport failure.
+    pub(crate) fn read(
+        mut response: ureq::http::Response<ureq::Body>,
+        body: Body,
+    ) -> Result<Self, TransportFailure> {
         let status = response.status().as_u16();
         let retry_after = response
             .headers()
@@ -124,9 +144,9 @@ impl Reply {
                 .as_reader()
                 .take(body.limit() as u64)
                 .read_to_end(&mut bytes)
-                .ok()?;
+                .map_err(|error| TransportFailure::of(&ureq::Error::from(error)))?;
         }
-        Some(Self {
+        Ok(Self {
             status,
             retry_after,
             body: bytes,
@@ -134,14 +154,20 @@ impl Reply {
     }
 }
 
-/// One authenticated GET. Nothing about it — the URL, the error, the reply —
-/// is logged, and the credential is only ever inside the header.
-pub(crate) fn send_get(url: &str, username: &str, token: &str, body: Body) -> Option<Reply> {
+/// One authenticated GET. The credential is only ever inside the header, and
+/// a failure carries only its classified reason and the TLS or I/O error's own
+/// message, never the URL or the reply.
+pub(crate) fn send_get(
+    url: &str,
+    username: &str,
+    token: &str,
+    body: Body,
+) -> Result<Reply, TransportFailure> {
     let response = usage_http::get_without_redirects(url, Auth::Basic { username, token })
         .header("Accept", body.accept())
         .header("User-Agent", USER_AGENT)
         .call()
-        .ok()?;
+        .map_err(|error| TransportFailure::of(&error))?;
     Reply::read(response, body)
 }
 
@@ -207,20 +233,83 @@ fn names_commits(link: &str, head: &str, base: &str) -> bool {
 /// neither the diffstat nor the diff, and carries those
 /// (`pull-request-viewer`: *Detail Re-reads Reuse Unchanged Files*). `clear`
 /// is asked before every request and ends the read when it may not be sent.
+/// A read that fails on a request hands that failure to `report`, once
+/// ([`Sent::failure`]); its result is the same either way.
 pub(crate) fn read_with(
     pull_request: &PullRequestReference,
-    mut get: impl FnMut(&str, Body) -> Option<Reply>,
+    mut get: impl FnMut(&str, Body) -> Result<Reply, TransportFailure>,
     reuse: impl FnOnce(&str, &str, &ReadLinks) -> Option<ReusedFiles>,
     clear: impl Fn() -> Result<(), ReadEnd>,
     limits: &BitbucketLimits,
     now: impl Fn() -> u64,
+    report: impl FnOnce(&RequestFailure),
 ) -> Result<ReadParts, ReadEnd> {
-    let mut fetch = |url: &str, body: Body| {
-        clear()?;
-        verdict(get(url, body), limits, now())
-    };
+    let mut last = None;
+    let read = read_parts(
+        pull_request,
+        &mut |url: &str, body: Body, template: &'static str| {
+            clear()?;
+            let reply = get(url, body);
+            last = Some(Sent::of(template, &reply));
+            verdict(reply, limits, now())
+        },
+        reuse,
+    );
+    if let Err(end) = &read {
+        if let Some(failure) = last.and_then(|sent| sent.failure(end)) {
+            report(&failure);
+        }
+    }
+    read
+}
+
+/// The last request a read sent, by its path template, and what came of it:
+/// its reply's status, or why it produced none.
+struct Sent {
+    template: &'static str,
+    outcome: Result<u16, TransportFailure>,
+}
+
+impl Sent {
+    fn of(template: &'static str, reply: &Result<Reply, TransportFailure>) -> Self {
+        Self {
+            template,
+            outcome: reply
+                .as_ref()
+                .map(|reply| reply.status)
+                .map_err(Clone::clone),
+        }
+    }
+
+    /// What a read that ended with `end`, this its last request, failed on.
+    /// Nothing when it did not fail on a request: when it was stopped, or held
+    /// back by a deadline or the budget, before its next one. Otherwise the
+    /// transport failure; a 429; any other non-success status; or a 2xx reply
+    /// the read could not use as it expected.
+    fn failure(self, end: &ReadEnd) -> Option<RequestFailure> {
+        let reason = match (self.outcome, end) {
+            (_, ReadEnd::Abandoned) => return None,
+            (Err(failure), _) => return Some(RequestFailure::transport(self.template, failure)),
+            (Ok(429), _) => UnavailableReason::RateLimited,
+            (Ok(_), ReadEnd::Deferred { .. }) => return None,
+            (Ok(status), _) if !(200..=299).contains(&status) => {
+                UnavailableReason::HttpStatus { status }
+            }
+            (Ok(_), _) => UnavailableReason::UnexpectedResponse,
+        };
+        Some(RequestFailure::because(self.template, reason))
+    }
+}
+
+/// The read itself, over `fetch`, which sends one GET, names it by its path
+/// template, and gives its body or how the read ends.
+fn read_parts(
+    pull_request: &PullRequestReference,
+    fetch: &mut impl FnMut(&str, Body, &'static str) -> Result<Vec<u8>, ReadEnd>,
+    reuse: impl FnOnce(&str, &str, &ReadLinks) -> Option<ReusedFiles>,
+) -> Result<ReadParts, ReadEnd> {
     let base = pull_request_url(pull_request);
-    let read = json(&fetch(&base, Body::Json)?)?;
+    let read = json(&fetch(&base, Body::Json, PULL_REQUEST_PATH)?)?;
     // A payload that lacks either link, or names one `followable` refuses,
     // is unavailable: the payload parsed, and it says this pull request
     // cannot be read the way the requirement allows.
@@ -241,16 +330,21 @@ pub(crate) fn read_with(
     let files = match reused {
         Some(reused) => ReadFiles::Reused(reused),
         None => {
-            let (diffstat, size) = pages(&mut fetch, links.diffstat.clone())?;
-            let diff = fetch(&links.diff, Body::Diff)?;
+            let (diffstat, size) = pages(fetch, links.diffstat.clone(), DIFFSTAT_PATH)?;
+            let diff = fetch(&links.diff, Body::Diff, DIFF_PATH)?;
             let (files, unlisted) = files(&diffstat, size, &diff);
             ReadFiles::Listed { files, unlisted }
         }
     };
-    let (comments, _) = pages(&mut fetch, format!("{base}/comments?pagelen={PAGE_LEN}"))?;
+    let (comments, _) = pages(
+        fetch,
+        format!("{base}/comments?pagelen={PAGE_LEN}"),
+        COMMENTS_PATH,
+    )?;
     let statuses = json(&fetch(
         &format!("{base}/statuses?pagelen={PAGE_LEN}"),
         Body::Json,
+        STATUSES_PATH,
     )?)?;
 
     let (conversation, threads) = conversation_and_threads(&comments);
@@ -321,7 +415,7 @@ pub(crate) fn src_url(pull_request: &PullRequestReference, commit: &str, path: &
 pub(crate) fn read_images_with(
     pull_request: &PullRequestReference,
     fetch: &ImageFetch,
-    mut get: impl FnMut(&str, Body) -> Option<Reply>,
+    mut get: impl FnMut(&str, Body) -> Result<Reply, TransportFailure>,
     clear: impl Fn() -> Result<(), ReadEnd>,
     limits: &BitbucketLimits,
     now: impl Fn() -> u64,
@@ -361,12 +455,12 @@ pub(crate) fn read_images_with(
 /// redirect is redirected, never followed, so the view can say so and link to
 /// the file's diff on BitBucket.
 fn image_verdict(
-    reply: Option<Reply>,
+    reply: Result<Reply, TransportFailure>,
     limits: &BitbucketLimits,
     now: u64,
 ) -> Result<Vec<u8>, ReadEnd> {
     match reply {
-        Some(reply) if (300..=399).contains(&reply.status) => Err(ReadEnd::Redirected),
+        Ok(reply) if (300..=399).contains(&reply.status) => Err(ReadEnd::Redirected),
         reply => verdict(reply, limits, now),
     }
 }
@@ -388,8 +482,12 @@ fn merge_base_in(body: &[u8]) -> Result<String, ReadEnd> {
 /// the poller, a redirect or a 404 is unavailable for the pull request; a
 /// transport error or any other status is transient (`pull-request-viewer`:
 /// *BitBucket Detail Reads*).
-fn verdict(reply: Option<Reply>, limits: &BitbucketLimits, now: u64) -> Result<Vec<u8>, ReadEnd> {
-    let reply = reply.ok_or(ReadEnd::Transient)?;
+fn verdict(
+    reply: Result<Reply, TransportFailure>,
+    limits: &BitbucketLimits,
+    now: u64,
+) -> Result<Vec<u8>, ReadEnd> {
+    let reply = reply.map_err(|_| ReadEnd::Transient)?;
     match usage_http::classify(reply.status, reply.retry_after.as_deref()) {
         Verdict::Read => Ok(reply.body),
         Verdict::Unauthenticated | Verdict::Forbidden => Err(ReadEnd::Unauthenticated),
@@ -420,10 +518,12 @@ fn json(body: &[u8]) -> Result<Value, ReadEnd> {
 /// Up to [`DETAIL_MAX_PAGES`] pages of a listing from `first`, following each
 /// page's `next` while it may be followed: their `values` in order, and the
 /// listing's `size` when a page gives it. A page without a `values` list is
-/// transient, as a page that is not JSON is.
+/// transient, as a page that is not JSON is. Every page is named by the
+/// listing's `template`.
 fn pages(
-    fetch: &mut impl FnMut(&str, Body) -> Result<Vec<u8>, ReadEnd>,
+    fetch: &mut impl FnMut(&str, Body, &'static str) -> Result<Vec<u8>, ReadEnd>,
     first: String,
+    template: &'static str,
 ) -> Result<(Vec<Value>, Option<u64>), ReadEnd> {
     let mut values = Vec::new();
     let mut size = None;
@@ -434,7 +534,7 @@ fn pages(
         let Some(url) = next.take() else {
             break;
         };
-        let page = json(&fetch(&url, Body::Json)?)?;
+        let page = json(&fetch(&url, Body::Json, template)?)?;
         let listed = page
             .get("values")
             .and_then(Value::as_array)
@@ -837,20 +937,28 @@ mod tests {
         }
     }
 
-    fn ok(body: impl Into<Vec<u8>>) -> Option<Reply> {
-        Some(Reply {
+    fn ok(body: impl Into<Vec<u8>>) -> Result<Reply, TransportFailure> {
+        Ok(Reply {
             status: 200,
             retry_after: None,
             body: body.into(),
         })
     }
 
-    fn status(code: u16) -> Option<Reply> {
-        Some(Reply {
+    fn status(code: u16) -> Result<Reply, TransportFailure> {
+        Ok(Reply {
             status: code,
             retry_after: None,
             body: Vec::new(),
         })
+    }
+
+    /// A request that timed out, producing no reply.
+    fn timed_out() -> TransportFailure {
+        TransportFailure {
+            reason: UnavailableReason::Timeout,
+            message: Some("timeout: global".to_string()),
+        }
     }
 
     fn payload() -> Value {
@@ -894,15 +1002,17 @@ mod tests {
 
     /// A scripted BitBucket: the pull request, its diffstat and comment
     /// pages, its diff and its statuses, each overridable by URL prefix;
-    /// every request recorded with the body it asked for.
+    /// every request recorded with the body it asked for, and every failure
+    /// a read reports.
     struct Api {
         payload: Value,
         diffstat: Vec<Vec<Value>>,
         diff: Vec<u8>,
         comments: Vec<Vec<Value>>,
         statuses: Vec<Value>,
-        replies: Vec<(String, Option<Reply>)>,
+        replies: Vec<(String, Result<Reply, TransportFailure>)>,
         requested: RefCell<Vec<(String, Body)>>,
+        reported: RefCell<Vec<RequestFailure>>,
     }
 
     impl Api {
@@ -915,11 +1025,12 @@ mod tests {
                 statuses: Vec::new(),
                 replies: Vec::new(),
                 requested: RefCell::new(Vec::new()),
+                reported: RefCell::new(Vec::new()),
             }
         }
 
         /// Answers every URL starting with `prefix` with `reply`.
-        fn reply(mut self, prefix: &str, reply: Option<Reply>) -> Self {
+        fn reply(mut self, prefix: &str, reply: Result<Reply, TransportFailure>) -> Self {
             self.replies.push((prefix.to_string(), reply));
             self
         }
@@ -930,7 +1041,7 @@ mod tests {
             pages: &[Vec<Value>],
             page: usize,
             next: impl Fn(usize) -> String,
-        ) -> Option<Reply> {
+        ) -> Result<Reply, TransportFailure> {
             let values = pages.get(page - 1).cloned().unwrap_or_default();
             let mut body = json!({ "values": values, "pagelen": 100, "page": page });
             if page < pages.len() {
@@ -939,7 +1050,7 @@ mod tests {
             ok(body.to_string())
         }
 
-        fn get(&self, url: &str, body: Body) -> Option<Reply> {
+        fn get(&self, url: &str, body: Body) -> Result<Reply, TransportFailure> {
             self.requested.borrow_mut().push((url.to_string(), body));
             if let Some((_, reply)) = self
                 .replies
@@ -998,7 +1109,17 @@ mod tests {
                 clear,
                 limits,
                 || NOW,
+                |failure| self.reported.borrow_mut().push(failure.clone()),
             )
+        }
+
+        /// Every failure the reads so far reported, as their lines.
+        fn lines(&self) -> Vec<String> {
+            self.reported
+                .borrow()
+                .iter()
+                .map(|failure| failure.line("bitbucket"))
+                .collect()
         }
 
         fn urls(&self) -> Vec<String> {
@@ -1935,7 +2056,7 @@ mod tests {
             for code in [301, 302, 307, 308, 404] {
                 let api = Api::new().reply(
                     prefix,
-                    Some(Reply {
+                    Ok(Reply {
                         status: code,
                         retry_after: None,
                         body: b"https://elsewhere.example/".to_vec(),
@@ -1966,7 +2087,7 @@ mod tests {
         let limits = BitbucketLimits::new();
         let hinted = Api::new().reply(
             DIFFSTAT,
-            Some(Reply {
+            Ok(Reply {
                 status: 429,
                 retry_after: Some("900".to_string()),
                 body: Vec::new(),
@@ -1986,7 +2107,10 @@ mod tests {
     /// nothing more.
     #[test]
     fn a_transport_error_another_status_or_a_bad_body_is_transient() {
-        assert_eq!(Api::new().reply(DIFF, None).read(), Err(ReadEnd::Transient));
+        assert_eq!(
+            Api::new().reply(DIFF, Err(timed_out())).read(),
+            Err(ReadEnd::Transient)
+        );
         assert_eq!(
             Api::new().reply(BASE, status(500)).read(),
             Err(ReadEnd::Transient)
@@ -2035,7 +2159,7 @@ mod tests {
         for code in [401, 403, 404, 302, 429, 500] {
             let api = Api::new().reply(
                 DIFF,
-                Some(Reply {
+                Ok(Reply {
                     status: code,
                     retry_after: Some(token.to_string()),
                     body: format!("bad credential {token}").into_bytes(),
@@ -2043,7 +2167,165 @@ mod tests {
             );
             let debug = format!("{:?}", api.read());
             assert!(!debug.contains(token), "{code}: {debug}");
+            let lines = api.lines();
+            assert!(lines.iter().all(|line| !line.contains(token)), "{lines:?}");
         }
+    }
+
+    // ------------------------------------------------- reported failures
+
+    /// `bitbucket-pull-requests`: *A failed detail read is reported* — one
+    /// line naming the pull request's template and why, and nothing of the
+    /// workspace, the repository, the number or the URL.
+    #[test]
+    fn a_failed_detail_read_is_reported() {
+        let api = Api::new().reply(BASE, Err(timed_out()));
+        assert_eq!(api.read(), Err(ReadEnd::Transient));
+        let lines = api.lines();
+        assert_eq!(
+            lines,
+            [
+                "specforge: bitbucket: GET /2.0/repositories/{workspace}/{repo}/pullrequests/{id} \
+              failed: timeout (timeout: global)"
+            ]
+        );
+        for value in ["acme", "api", "7", "https", "?"] {
+            assert!(!lines[0].contains(value), "{value} in {}", lines[0]);
+        }
+    }
+
+    /// Each request a read fails on is named by its own template, with the
+    /// reason it failed for; a read reports one line, whichever it was.
+    #[test]
+    fn each_failed_request_is_named_by_its_template() {
+        let (comments, statuses) = (format!("{BASE}/comments"), format!("{BASE}/statuses"));
+        let pull_request = "/2.0/repositories/{workspace}/{repo}/pullrequests/{id}";
+        let cases = [
+            (BASE, status(500), pull_request.to_string(), "HTTP 500"),
+            (BASE, status(401), pull_request.to_string(), "HTTP 401"),
+            (BASE, status(302), pull_request.to_string(), "HTTP 302"),
+            (
+                DIFFSTAT,
+                status(503),
+                "/2.0/repositories/{workspace}/{repo}/diffstat/{spec}".to_string(),
+                "HTTP 503",
+            ),
+            (
+                DIFFSTAT,
+                status(429),
+                "/2.0/repositories/{workspace}/{repo}/diffstat/{spec}".to_string(),
+                "rate limited",
+            ),
+            (
+                DIFF,
+                Err(timed_out()),
+                "/2.0/repositories/{workspace}/{repo}/diff/{spec}".to_string(),
+                "timeout (timeout: global)",
+            ),
+            (
+                comments.as_str(),
+                status(404),
+                format!("{pull_request}/comments"),
+                "HTTP 404",
+            ),
+            (
+                statuses.as_str(),
+                ok("<html>"),
+                format!("{pull_request}/statuses"),
+                "unexpected response",
+            ),
+        ];
+        for (prefix, reply, template, reason) in cases {
+            let api = Api::new().reply(prefix, reply);
+            assert!(api.read().is_err(), "{prefix}");
+            assert_eq!(
+                api.lines(),
+                [format!(
+                    "specforge: bitbucket: GET {template} failed: {reason}"
+                )],
+                "{prefix}"
+            );
+        }
+    }
+
+    /// A payload the read cannot follow fails on the pull request's own
+    /// request, and a later page of a listing on the listing's template.
+    #[test]
+    fn a_reply_the_read_cannot_use_names_the_request_it_came_from() {
+        let mut api = Api::new();
+        api.payload = json!({ "id": 7, "links": {} });
+        assert_eq!(api.read(), Err(ReadEnd::Unavailable));
+        assert_eq!(
+            api.lines(),
+            [
+                "specforge: bitbucket: GET /2.0/repositories/{workspace}/{repo}/pullrequests/{id} \
+              failed: unexpected response"
+            ]
+        );
+
+        let mut api = Api::new().reply(&format!("{DIFFSTAT}&page=2"), status(500));
+        api.diffstat = vec![Vec::new(), Vec::new()];
+        assert_eq!(api.read(), Err(ReadEnd::Transient));
+        assert_eq!(
+            api.lines(),
+            [
+                "specforge: bitbucket: GET /2.0/repositories/{workspace}/{repo}/diffstat/{spec} \
+              failed: HTTP 500"
+            ]
+        );
+    }
+
+    /// A read that succeeds, or that ends without failing on a request — it
+    /// was stopped between requests, held back by the budget before one, or
+    /// sent none — reports nothing.
+    #[test]
+    fn a_read_that_did_not_fail_on_a_request_reports_nothing() {
+        let api = Api::new();
+        parts_of(&api);
+        assert!(api.lines().is_empty());
+
+        for end in [ReadEnd::Abandoned, ReadEnd::Deferred { until: NOW + 60 }] {
+            let api = Api::new();
+            let outcome = api.read_under(&BitbucketLimits::new(), || {
+                if api.requested.borrow().is_empty() {
+                    Ok(())
+                } else {
+                    Err(end)
+                }
+            });
+            assert_eq!(outcome, Err(end));
+            assert!(api.lines().is_empty(), "{end:?}: {:?}", api.lines());
+
+            let api = Api::new();
+            assert_eq!(
+                api.read_under(&BitbucketLimits::new(), || Err(end)),
+                Err(end)
+            );
+            assert!(api.urls().is_empty() && api.lines().is_empty());
+        }
+    }
+
+    /// A 2xx body the transport cuts short is a transport failure, with the
+    /// I/O error's reason and words.
+    #[test]
+    fn a_body_that_cannot_be_read_is_a_transport_failure() {
+        struct Stalled;
+        impl std::io::Read for Stalled {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            }
+        }
+        let response = ureq::http::Response::builder()
+            .status(200)
+            .body(ureq::Body::builder().reader(Stalled))
+            .unwrap();
+        assert_eq!(
+            Reply::read(response, Body::Json),
+            Err(TransportFailure {
+                reason: UnavailableReason::Timeout,
+                message: Some("timed out".to_string()),
+            })
+        );
     }
 
     // ------------------------------------------------------------ the transport
@@ -2250,7 +2532,7 @@ mod tests {
         assert_eq!(verdict(status(403)), Err(ReadEnd::Unauthenticated));
         assert_eq!(verdict(status(404)), Err(ReadEnd::Unavailable));
         assert_eq!(verdict(status(500)), Err(ReadEnd::Transient));
-        assert_eq!(verdict(None), Err(ReadEnd::Transient));
+        assert_eq!(verdict(Err(timed_out())), Err(ReadEnd::Transient));
         assert_eq!(
             verdict(status(429)),
             Err(ReadEnd::Deferred {

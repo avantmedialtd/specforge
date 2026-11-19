@@ -44,6 +44,7 @@ use crate::pull_request_detail::{
 use crate::pull_request_limits::{Admission, Deadlines, DetailPermit};
 use crate::pull_requests::PullRequestSummary;
 use crate::settings::SettingsStore;
+use crate::usage_http::TransportFailure;
 use openspec_core::DiffFile;
 
 /// Everything a detail read touches outside the service.
@@ -70,7 +71,11 @@ pub(crate) trait DetailIo: Send + Sync {
         token: &str,
         url: &str,
         body: Body,
-    ) -> Option<bitbucket_detail::Reply>;
+    ) -> Result<bitbucket_detail::Reply, TransportFailure>;
+    /// Writes one line to standard error: a failed BitBucket detail read's
+    /// (`bitbucket-pull-requests`: *Failures Are Reported on Standard
+    /// Error*).
+    fn report(&self, line: &str);
 }
 
 /// The real I/O: the wall clock, the process environment, and HTTPS.
@@ -113,8 +118,12 @@ impl DetailIo for LiveIo {
         token: &str,
         url: &str,
         body: Body,
-    ) -> Option<bitbucket_detail::Reply> {
+    ) -> Result<bitbucket_detail::Reply, TransportFailure> {
         bitbucket_detail::send_get(url, username, token, body)
+    }
+
+    fn report(&self, line: &str) {
+        eprintln!("{line}");
     }
 }
 
@@ -274,6 +283,7 @@ fn read_bitbucket(
         || clear_to_send(current, &permit, io.now()),
         limits,
         || io.now(),
+        |failure| io.report(&failure.line("bitbucket")),
     )?;
     Ok((parts, read_at, credential_fingerprint))
 }
@@ -652,6 +662,8 @@ pub(crate) mod fake {
         requests: Mutex<Vec<String>>,
         hook: Mutex<Option<Hook>>,
         pushed: Mutex<Pushed>,
+        bitbucket_failure: Mutex<Option<TransportFailure>>,
+        reported: Mutex<Vec<String>>,
     }
 
     impl FakeIo {
@@ -662,7 +674,20 @@ pub(crate) mod fake {
                 requests: Mutex::new(Vec::new()),
                 hook: Mutex::new(None),
                 pushed: Mutex::new(Pushed::default()),
+                bitbucket_failure: Mutex::new(None),
+                reported: Mutex::new(Vec::new()),
             })
+        }
+
+        /// Every later BitBucket GET produces no reply, failing with
+        /// `failure`.
+        pub(crate) fn fail_bitbucket(&self, failure: TransportFailure) {
+            *self.bitbucket_failure.lock().unwrap() = Some(failure);
+        }
+
+        /// Every line written to standard error so far, in order.
+        pub(crate) fn reported(&self) -> Vec<String> {
+            self.reported.lock().unwrap().clone()
         }
 
         pub(crate) fn set_now(&self, now: u64) {
@@ -724,8 +749,8 @@ pub(crate) mod fake {
         })
     }
 
-    fn bitbucket_ok(body: impl Into<Vec<u8>>) -> Option<bitbucket_detail::Reply> {
-        Some(bitbucket_detail::Reply {
+    fn bitbucket_ok(body: impl Into<Vec<u8>>) -> Result<bitbucket_detail::Reply, TransportFailure> {
+        Ok(bitbucket_detail::Reply {
             status: 200,
             retry_after: None,
             body: body.into(),
@@ -799,15 +824,20 @@ pub(crate) mod fake {
         }
 
         /// Any pull request, with the pushed diff, no comments and no
-        /// statuses. Its links name its commits, as BitBucket's do.
+        /// statuses. Its links name its commits, as BitBucket's do. Every
+        /// GET fails once a test has made BitBucket fail.
         fn bitbucket_get(
             &self,
             _: &str,
             _: &str,
             url: &str,
             _: Body,
-        ) -> Option<bitbucket_detail::Reply> {
+        ) -> Result<bitbucket_detail::Reply, TransportFailure> {
             self.record(format!("GET {url}"));
+            let failure = self.bitbucket_failure.lock().unwrap().clone();
+            if let Some(failure) = failure {
+                return Err(failure);
+            }
             let api = "https://api.bitbucket.org/2.0/repositories";
             let pushed = self.pushed();
             if url.contains("/merge-base/") {
@@ -825,7 +855,7 @@ pub(crate) mod fake {
                     (200, None) => (404, Vec::new()),
                     (status, _) => (status, Vec::new()),
                 };
-                return Some(bitbucket_detail::Reply {
+                return Ok(bitbucket_detail::Reply {
                     status,
                     retry_after: None,
                     body,
@@ -854,6 +884,10 @@ pub(crate) mod fake {
                     },
                 }).to_string())
             }
+        }
+
+        fn report(&self, line: &str) {
+            self.reported.lock().unwrap().push(line.to_string());
         }
     }
 }

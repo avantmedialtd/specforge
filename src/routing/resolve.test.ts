@@ -647,6 +647,7 @@ function bitbucketPanel(
             fetchedAtUnix: status === "ok" ? 1_700_000_000 : null,
             pullRequests,
             skippedWorkspaces: [],
+            reason: null,
         },
     }
 }

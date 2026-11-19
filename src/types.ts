@@ -903,6 +903,24 @@ export interface PullRequestSummary {
     unresolvedThreads: number
 }
 
+/** Why a refresh left a snapshot unavailable or stale: a closed set matched on
+ *  `kind`, never text from a reply or an error (`UnavailableReason` in
+ *  `crates/openspec-app/src/usage_http.rs`). `certificateUntrusted` is a
+ *  rejected certificate chain, `tls` any other TLS failure, `connect` a
+ *  connection refused, reset or unreachable, `httpStatus` a non-success reply
+ *  that is neither unauthenticated nor rate limited, `unexpectedResponse` a
+ *  reply that could not be read, and `rateLimited` a 429 or the shared
+ *  deadline holding the poller. */
+export type UnavailableReason =
+    | { kind: "certificateUntrusted" }
+    | { kind: "tls" }
+    | { kind: "dns" }
+    | { kind: "connect" }
+    | { kind: "timeout" }
+    | { kind: "httpStatus"; status: number }
+    | { kind: "unexpectedResponse" }
+    | { kind: "rateLimited" }
+
 /** The BitBucket snapshot its panel renders (`get_bitbucket_pull_requests`). */
 export interface BitbucketPullRequestsState {
     status: PullRequestsStatus
@@ -915,6 +933,9 @@ export interface BitbucketPullRequestsState {
     pullRequests: PullRequestSummary[]
     /** Workspaces that answered 403/404 and were skipped (informational). */
     skippedWorkspaces: string[]
+    /** Why the last refresh failed: set exactly while the snapshot is
+     *  unavailable or stale, `null` otherwise. */
+    reason: UnavailableReason | null
 }
 
 /** The GitHub snapshot its panel renders (`get_github_pull_requests`). */

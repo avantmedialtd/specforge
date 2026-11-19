@@ -40,6 +40,12 @@ use app::{Model, Msg};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    // The screen is ours: the root set's one-time line, written when the
+    // quota poller's first HTTPS request builds it, would land on it
+    // (`outbound-https-trust`: *The Root Set Is Reported Once*). This frontend
+    // runs no pull-request poller and no detail read, so it writes none of
+    // the BitBucket lines either.
+    openspec_app::trust_roots::silence_report();
     let Some(config_dir) = openspec_app::config_dir() else {
         eprintln!("could not resolve the SpecForge configuration directory");
         std::process::exit(1);

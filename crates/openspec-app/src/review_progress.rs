@@ -2053,6 +2053,7 @@ mod tests {
                 })
                 .collect(),
             skipped_workspaces: Vec::new(),
+            reason: None,
         }
     }
 
