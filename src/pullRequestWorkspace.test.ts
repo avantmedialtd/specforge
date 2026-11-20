@@ -237,17 +237,24 @@ describe("status and panel triage", () => {
         expect(checkSummary(checks)).toBe("2 failed · 1 pending · 1 passed · 2 other")
         expect(checkSummary([])).toBe("No checks reported")
     })
-    test("search covers number, title, repository and both branches", () => {
-        for (const text of ["#7", "FIND A", "ACME", "FEATURE/FIND", "main"]) {
-            expect(matchesPanel(row(7), text, "all", false)).toBe(true)
+    test("All includes every row without a text query", () => {
+        expect(matchesPanel(row(7), "all", false)).toBe(true)
+        expect(matchesPanel(row(8, {
+            title: "Unrelated", repoFullName: "other/repo",
+            sourceBranch: "different", destinationBranch: "release",
+        }), "all", true)).toBe(true)
+    })
+    test("status filters retain their existing signals", () => {
+        for (const checks of [null, "passing", "pending"] as const) {
+            expect(matchesPanel(row(7, { checks }), "failing", false)).toBe(false)
         }
-        expect(matchesPanel(row(7), "elsewhere", "all", false)).toBe(false)
-        expect(matchesPanel(row(7), "", "failing", false)).toBe(false)
-        expect(matchesPanel(row(7, { checks: "failing" }), "workspace", "failing", false)).toBe(true)
-        expect(matchesPanel(row(7, { draft: true }), "", "drafts", false)).toBe(true)
-        expect(matchesPanel(row(7, { conflicting: true }), "", "conflicts", false)).toBe(true)
-        expect(matchesPanel(row(7), "", "requested", false)).toBe(false)
-        expect(matchesPanel(row(7), "", "requested", true)).toBe(true)
+        expect(matchesPanel(row(7, { checks: "failing" }), "failing", false)).toBe(true)
+        expect(matchesPanel(row(7, { draft: true }), "drafts", false)).toBe(true)
+        expect(matchesPanel(row(7, { draft: false }), "drafts", false)).toBe(false)
+        expect(matchesPanel(row(7, { conflicting: true }), "conflicts", false)).toBe(true)
+        expect(matchesPanel(row(7, { conflicting: false }), "conflicts", false)).toBe(false)
+        expect(matchesPanel(row(7), "requested", false)).toBe(false)
+        expect(matchesPanel(row(7), "requested", true)).toBe(true)
     })
     test("refresh retains surviving positions and appends newcomers", () => {
         const updated = row(1, { checks: "failing" })
