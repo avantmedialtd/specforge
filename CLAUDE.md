@@ -17,20 +17,16 @@ Package manager is **bun**. Tauri dev/build commands are invoked through bun scr
 
 | Action | Command |
 |---|---|
-| Run the desktop app in dev mode | `bun tauri dev` |
 | Run the dev app on this worktree's slot (side-by-side) | `bun run wt:dev` (see *Concurrent worktrees* below) |
 | Run dev with WebView devtools auto-opened | `bun run tauri:devtools` (or set `SPECFORGE_OPEN_DEVTOOLS=1`) |
-| Type-check + build frontend bundle | `bun run build` |
 | Lint the frontend (what CI gates on) | `bun run lint` — oxlint, type-aware; rules and the reason for each in `.oxlintrc.json` |
 | Lint + format-check Rust (what CI gates on) | `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check`; extra lints in `[workspace.lints.clippy]` |
-| Build production app bundle | `bun tauri build` |
 | Run Rust tests (workspace) | `bun install && bun run build` **once per fresh worktree**, then `cargo test` |
 | Run a single Rust integration test | `cargo test -p openspec-core --test <target>` — `ls crates/openspec-core/tests/` for the live set |
 | Run a single test by name | `cargo test -p openspec-core <name_substring>` |
 | Mutation-test your changes (what CI gates on) | `git fetch origin master && git diff $(git merge-base origin/master HEAD) HEAD > /tmp/sf.diff && cargo mutants --in-diff /tmp/sf.diff` (install: `cargo install --locked cargo-mutants`) |
 | List mutants in scope (instant, no build) | `cargo mutants --list` |
 | Run the marketing site in dev mode | `bun run site:dev` (see *The marketing site* below) |
-| Build the marketing site | `bun run site:build` |
 | Run the marketing site's e2e suite | `bun run site:test` |
 
 **`cargo test` fails workspace-wide in a fresh worktree until `dist/` exists.** It is gitignored, and both Tauri's `generate_context!` and specforge-web's `RustEmbed` need it at compile time — the failure surfaces as an opaque proc-macro error about a missing directory, not as a missing bundle. A *stale* `dist/` is the other half of the trap: debug builds of `specforge-web` read it from disk per request, so re-run `bun run build` before trusting a UI check.
@@ -45,17 +41,9 @@ State is **shared by design**: every instance resolves the same `config_dir()` (
 
 ### The marketing site
 
-`site/` is the Vike + React static site published at `specforge.avantmedia.uk`. It documents this app's binaries, flags and install routes, which is why it lives here rather than in the studio monorepo it moved out of.
+`site/` is the Vike + React static site published at `specforge.avantmedia.uk`. It is deliberately isolated from the root workspace; its guidance lives in `site/CLAUDE.md`. One part bites from the root:
 
-It is **deliberately isolated**: its own `package.json`, `bun.lock` and `node_modules`, and **not** a member of any workspace glob. The root `bun install`, the root `tsc` (`include: ["src"]`) and the root Vite build never touch it, and it resolves its own React/Vite versions rather than the desktop app's.
-
-Three things bite if you forget them:
-
-- **Every site command must run with the working directory set to `site/`.** The sitemap and search-index Vite plugins resolve `<cwd>/pages` and write `<cwd>/public`. The root `site:*` scripts all go through `bun run --cwd site` for exactly this reason.
 - **The root `bunfig.toml` is load-bearing.** `bun test` matches `*.spec.ts` as well as `*.test.ts`, so without `[test] pathIgnorePatterns` the root test job collects the site's Playwright specs and dies on the first `test.describe()`. Discovery grows with every new `*.test.ts(x)`, so a count proves nothing. If the root test job dies on `test.describe()`, or discovery suddenly picks up files under `site/`, check that file first.
-- **`site/site-kit/` is a vendored fork**, not a dependency — see its README for the source commit and the `diff -r` drift check. Do not reintroduce a barrel that re-exports a `Layout`; the upstream ones reach into a design system that was deliberately left behind.
-
-Publishing is `.github/workflows/site.yml`, path-filtered to `site/**` and separate from `ci.yml` on purpose. It stays inert until the `SITE_DEPLOY_ROLE_ARN` repository variable is set, and dry-runs until `SITE_DEPLOY_MODE` is `live`.
 
 ## Architecture
 
@@ -71,11 +59,6 @@ A user-visible change usually has to land in more than one frontend. Logic that 
 
 Per-layer detail lives next to the code it describes: `crates/CLAUDE.md` (Rust workspace) and `src/CLAUDE.md` (frontend, including the four places a new command must be registered).
 
-### Window-lifecycle quirks
-
-- The main window's **close button hides** rather than destroys (the watcher and tray must keep running). Cmd-Q, the "Quit SpecForge" tray item, or `app.exit(0)` are the only exit paths.
-- On macOS, clicking the Dock icon when no windows are visible re-shows the main window (handled in the `RunEvent::Reopen` branch of `run()`).
-
 ## OpenSpec workflow
 
 This repo dogfoods OpenSpec: each active change directory under `openspec/changes/` may contain `proposal.md`, `design.md`, `tasks.md`, and a `specs/<capability>/spec.md` subtree — the same four-artifact structure SpecForge browses for any registered workspace. When adding or modifying behaviour, check the relevant capability spec for the contract you're working against.
@@ -86,7 +69,6 @@ This repo dogfoods OpenSpec: each active change directory under `openspec/change
 - Avoid `cd` in shell commands; use absolute paths or `cargo` / `bun` flags that target the right crate/package.
 - **Suppressions must earn their place, and both linters check that they still do.** In Rust write `#[expect(lint, reason = "…")]`, never `#[allow]` (`clippy::allow_attributes` rejects it): an expectation that stops firing fails the build. oxlint reports an unused disable directive as an error. A `react-hooks/exhaustive-deps` directive must be the line *directly above the deps array*: put the reason in a comment above the directive, because a reason that wraps onto a second `//` line moves the directive's target onto that comment line, and it suppresses nothing.
 - Rust types crossing the IPC boundary use `#[serde(rename_all = "camelCase")]`. TypeScript mirrors live in `src/types.ts` — there's no codegen, so keep both sides matched.
-- **Keep the frontend crates thin.** Parsers, registries, caches and watchers belong in `openspec-core` so they stay testable from `cargo test`; anything stateful that more than one frontend needs — settings, service orchestration, dashboard assembly, quota — belongs in `openspec-app`. `crates/specforge/src/commands.rs` should only deserialize args and call `AppService` / `SettingsStore`.
 - For UI changes that need visual verification, start the app yourself rather than asking the user to run it. The browser loop (`specforge-serve` + `bun run dev`) is the lighter default; reach for `bun tauri dev` when the native shell is what's under test.
 - **Mutation testing gates on changed lines.** `.github/workflows/mutants.yml` runs `cargo mutants --in-diff` against `origin/master` on every push, scoped to `openspec-core` + `openspec-app` (`.cargo/mutants.toml`). A survivor means a line you changed can be broken without any test noticing — add the assertion, or exclude the mutant in `.cargo/mutants.toml` with a written reason. Never reach for `--baseline=skip` to get past a failing test: with a red baseline every mutant's test run also fails, so every mutant reports as caught and the score is meaningless. Fix the test instead — and if its assertion depends on machine speed, make it deterministic rather than widening the margin (see `watcher.rs`'s `recompute_gate` for the pattern).
 - **Only those two crates are gated.** A diff touching only `crates/specforge/`, `crates/specforge-tui/` or `crates/specforge-web/` short-circuits the Mutants job — it reports green in seconds without running anything. Green there means "not run", not "covered"; cover those crates with ordinary tests.

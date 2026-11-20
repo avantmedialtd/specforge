@@ -76,3 +76,8 @@ Five crates: two library layers and three frontends. `openspec-core` holds pure 
 - **`crates/specforge-web/`** — the local web server: an embedded mode the desktop app's serve toggle drives, and a standalone binary `specforge-serve`, released alongside `specforge-tui` for macOS/Linux/Windows (see `release-pipeline`).
   - `dispatch.rs` is the `/api/invoke` command table — **one arm per Tauri command**. See `src/CLAUDE.md` for the parity rule; a missing arm is a runtime-only failure.
   - Bind resolution is `--bind <addr>`, else the `SPECFORGE_WEB_BIND` env var, else `127.0.0.1`. It is deliberately never a `WebServerConfig` field, because that struct is shared with the desktop app's embedded toggle — don't add a settings control for it by reflex. A non-loopback bind disables the request-authority allowlist; see the `web-ui` capability spec for the trust-boundary contract.
+
+## Window-lifecycle quirks
+
+- The main window's **close button hides** rather than destroys (the watcher and tray must keep running). Cmd-Q, the "Quit SpecForge" tray item, or `app.exit(0)` are the only exit paths.
+- On macOS, clicking the Dock icon when no windows are visible re-shows the main window (handled in the `RunEvent::Reopen` branch of `run()`).
