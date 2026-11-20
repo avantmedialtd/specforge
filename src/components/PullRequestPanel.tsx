@@ -437,7 +437,6 @@ export function PullRequestPanel({
 }) {
     const [collapsed, setCollapsed] = useState(() => readCollapsed(provider))
     const [nowMs, setNowMs] = useState(() => Date.now())
-    const [query, setQuery] = useState("")
     const [filter, setFilter] = useState<PanelFilter>("all")
     const [ordered, setOrdered] = useState(() => ({ panel, sections: panel ? panelSections(panel) : [] }))
     let sections = ordered.sections
@@ -450,10 +449,10 @@ export function PullRequestPanel({
     }
     const filteredSections = sections.map((section) => ({
         ...section,
-        rows: section.rows.filter((pr) => matchesPanel(pr, query, filter, section.key === "review-requested")),
+        rows: section.rows.filter((pr) => matchesPanel(pr, filter, section.key === "review-requested")),
     })).filter((section) => section.rows.length > 0)
     const filteredCount = filteredSections.reduce((total, section) => total + section.rows.length, 0)
-    const filtering = query.trim() !== "" || filter !== "all"
+    const filtering = filter !== "all"
 
     // A fresh snapshot restarts the relative-time clock, as a fresh read did
     // when the panel fetched its own.
@@ -514,9 +513,6 @@ export function PullRequestPanel({
                     // height caps.
                     <div className="pull-request-list">
                         <div className="pr-panel-controls">
-                            <input type="search" aria-label={`Search ${PANEL_TITLES[provider]}`}
-                                placeholder="Search pull requests…" value={query}
-                                onChange={(event) => setQuery(event.currentTarget.value)} />
                             <select aria-label="Filter pull requests" value={filter}
                                 onChange={(event) => setFilter(event.currentTarget.value as PanelFilter)}>
                                 <option value="all">All pull requests</option>
@@ -528,7 +524,7 @@ export function PullRequestPanel({
                             {filtering && <div className="pr-section-toolbar">
                                 <span>{filteredCount} / {rows?.length ?? 0} matching</span>
                                 <button type="button" className="pull-request-view-action"
-                                    onClick={() => { setQuery(""); setFilter("all") }}>Clear</button>
+                                    onClick={() => setFilter("all")}>Clear</button>
                             </div>}
                         </div>
                         {filteredCount === 0 && <p className="pull-request-panel-message">No matching pull requests.</p>}

@@ -5873,7 +5873,6 @@ body[data-surface="image"] #root {
 
 .pr-file-controls input,
 .pr-file-controls select,
-.pr-panel-controls input,
 .pr-panel-controls select,
 .pr-section-toolbar select {
     box-sizing: border-box;

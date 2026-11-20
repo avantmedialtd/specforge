@@ -1,6 +1,8 @@
-import { describe, expect, test } from "bun:test"
-import { createElement } from "react"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { act, createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
+import { installFakeDom, type FakeElement } from "../testing/fakeDom"
+import { installFakeTransport } from "../testing/fakeTransport"
 import {
     getBitbucketPullRequests,
     getGithubPullRequests,
@@ -50,12 +52,148 @@ test("the active PR is marked canonically and rows expose their PR number", () =
     }))
     expect(html).toContain('aria-current="page"')
     expect(html).toContain("acme/api #7")
-    expect(html).toContain('aria-label="Search GitHub pull requests"')
     expect(html).toContain('value="requested"')
     const bb = renderToStaticMarkup(createElement(PullRequestPanel, {
         provider: "bitbucket", panel: bitbucket(), onOpenPullRequest() {},
     }))
     expect(bb).not.toContain('value="requested"')
+})
+
+test("both providers offer status filters without a search field or empty search row", () => {
+    for (const panel of [bitbucket(), github()]) {
+        const html = renderToStaticMarkup(createElement(PullRequestPanel, {
+            provider: panel.provider, panel, onOpenPullRequest() {},
+        }))
+        expect(html).not.toContain("<input")
+        expect(html).not.toContain("Search pull requests")
+        expect(html).toContain('<div class="pr-panel-controls"><select aria-label="Filter pull requests"')
+        for (const value of ["all", "failing", "conflicts", "drafts"]) {
+            expect(html).toContain(`value="${value}"`)
+        }
+        expect(html).not.toContain(" matching")
+        expect(html).not.toContain(">Clear</button>")
+    }
+})
+
+describe("filter-only panel interactions", () => {
+    let dom: ReturnType<typeof installFakeDom>
+    let transport: ReturnType<typeof installFakeTransport>
+    let createRoot: typeof import("react-dom/client").createRoot
+
+    beforeAll(async () => {
+        dom = installFakeDom()
+        transport = installFakeTransport(() => null)
+        createRoot = (await import("react-dom/client")).createRoot
+    })
+    afterAll(() => {
+        transport.uninstall()
+        dom.uninstall()
+    })
+
+    function props(element: FakeElement): Record<string, unknown> {
+        const key = Object.keys(element).find((name) => name.startsWith("__reactProps$"))
+        if (!key) { throw new Error("the element carries no React props") }
+        return (element as unknown as Record<string, Record<string, unknown>>)[key]!
+    }
+
+    async function selectFilter(container: FakeElement, value: string) {
+        const select = container.findAll("select")[0]!
+        await act(async () => {
+            ;(props(select).onChange as (event: unknown) => void)({ currentTarget: { value } })
+        })
+    }
+
+    async function clearFilter(container: FakeElement) {
+        const clear = container.findAll("button").find((button) => button.textContent === "Clear")!
+        await act(async () => {
+            ;(props(clear).onClick as () => void)()
+        })
+        expect(props(container.findAll("select")[0]!).value).toBe("all")
+        expect(container.textContent).not.toContain(" matching")
+        expect(container.findAll("button").some((button) => button.textContent === "Clear")).toBe(false)
+    }
+
+    function listedIds(container: FakeElement) {
+        return container.findAll("span")
+            .filter((span) => span.getAttribute("class") === "pull-request-repo")
+            .map((span) => span.textContent.match(/#(\d+)$/)?.[1])
+    }
+
+    for (const provider of ["github", "bitbucket"] as const) {
+        test(`${provider} retains counts, local status filtering, no matches and Clear`, async () => {
+            const makeRow = provider === "github" ? ghRow : row
+            const rows = [
+                makeRow({ id: 1, title: "First", checks: "passing" }),
+                makeRow({ id: 2, title: "Second", checks: "failing" }),
+                makeRow({ id: 3, title: "Third", draft: true, conflicting: true }),
+            ]
+            const panel = provider === "github"
+                ? github({ authored: rows.slice(0, 2), reviewRequested: rows.slice(2) })
+                : bitbucket({ pullRequests: rows })
+            const container = dom.document.createElement("div")
+            const root = createRoot(container as unknown as Element)
+            const readsBefore = transport.calls.length
+            try {
+                await act(async () => root.render(createElement(PullRequestPanel, {
+                    provider, panel, onOpenPullRequest() {},
+                })))
+                const count = container.findAll("span").find((span) =>
+                    span.getAttribute("class") === "pull-request-panel-count",
+                )!
+                const headerTotal = count.textContent
+                expect(listedIds(container)).toEqual(["1", "2", "3"])
+                expect(container.findAll("input")).toHaveLength(0)
+                const focusedRow = container.findAll("a")[0]!
+                focusedRow.focus()
+                const urgent = { ...rows[0]!, checks: "failing" as const }
+                const refreshed = provider === "github"
+                    ? github({ authored: [rows[1]!, urgent], reviewRequested: rows.slice(2) })
+                    : bitbucket({ pullRequests: [rows[2]!, rows[1]!, urgent] })
+                await act(async () => root.render(createElement(PullRequestPanel, {
+                    provider, panel: refreshed, onOpenPullRequest() {},
+                })))
+                expect(listedIds(container)).toEqual(["1", "2", "3"])
+                expect(container.findAll("a")[0]).toBe(focusedRow)
+                expect(dom.document.activeElement).toBe(focusedRow)
+                expect(focusedRow.findAll("span").some((span) =>
+                    span.getAttribute("aria-label") === "Checks failing",
+                )).toBe(true)
+                await act(async () => root.render(createElement(PullRequestPanel, {
+                    provider, panel, onOpenPullRequest() {},
+                })))
+                for (const [filter, ids] of [
+                    ["failing", ["2"]], ["conflicts", ["3"]], ["drafts", ["3"]],
+                    ...(provider === "github" ? [["requested", ["3"]]] as const : []),
+                ] as const) {
+                    await selectFilter(container, filter)
+                    expect(listedIds(container)).toEqual([...ids])
+                    expect(container.textContent).toContain("1 / 3 matching")
+                    expect(count.textContent).toBe(headerTotal)
+                    await clearFilter(container)
+                    expect(listedIds(container)).toEqual(["1", "2", "3"])
+                }
+                const updatedRows = rows.map((pr) => ({ ...pr, checks: "passing" as const }))
+                const updated = provider === "github"
+                    ? github({ authored: updatedRows.slice(0, 2), reviewRequested: updatedRows.slice(2) })
+                    : bitbucket({ pullRequests: updatedRows })
+                await selectFilter(container, "failing")
+                await act(async () => root.render(createElement(PullRequestPanel, {
+                    provider, panel: updated, onOpenPullRequest() {},
+                })))
+                expect(listedIds(container)).toEqual([])
+                expect(container.textContent).toContain("0 / 3 matching")
+                expect(container.textContent).toContain("No matching pull requests.")
+                expect(container.textContent).not.toContain(PANEL_MESSAGES[provider].empty)
+                expect(container.textContent).not.toContain(PANEL_MESSAGES[provider].unauthenticated)
+                expect(count.textContent).toBe(headerTotal)
+                await clearFilter(container)
+                expect(listedIds(container)).toEqual(["1", "2", "3"])
+                expect(transport.calls).toHaveLength(readsBefore)
+            } finally {
+                await act(async () => root.unmount())
+            }
+        })
+    }
 })
 
 function row(overrides: Partial<PullRequestSummary> = {}): PullRequestSummary {

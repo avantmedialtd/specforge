@@ -221,12 +221,10 @@ export function checkSummary(checks: readonly PullRequestCheck[]): string {
 }
 
 export type PanelFilter = "all" | "failing" | "conflicts" | "drafts" | "requested"
-export function matchesPanel(pr: PullRequestSummary, query: string, filter: PanelFilter, requested: boolean): boolean {
-    const text = [pr.title, pr.repoFullName, `#${pr.id}`, pr.sourceBranch, pr.destinationBranch].join("\n")
-    return text.toLowerCase().includes(query.trim().toLowerCase()) &&
-        (filter === "all" || (filter === "failing" && pr.checks === "failing") ||
+export function matchesPanel(pr: PullRequestSummary, filter: PanelFilter, requested: boolean): boolean {
+    return filter === "all" || (filter === "failing" && pr.checks === "failing") ||
         (filter === "conflicts" && pr.conflicting === true) ||
-        (filter === "drafts" && pr.draft === true) || (filter === "requested" && requested))
+        (filter === "drafts" && pr.draft === true) || (filter === "requested" && requested)
 }
 
 export function panelRowKey(row: PullRequestSummary): string {
