@@ -1,0 +1,359 @@
+/* =====================================================================
+   Avant — Avant Media's editorial look, at SpecForge's reading scale
+   (theme-system: *The Theme Is a Selectable Preference*): black and white
+   neutrals with no tint, hot pink kept for actions, neon green kept for
+   done, square corners, hard offset shadows with no blur, uppercase mono
+   labels, and document titles in Archivo Black. Inter for the interface and
+   prose, JetBrains Mono for code.
+
+   What it takes from the brand is the ink, the edges and the one loud
+   colour. What it leaves behind is everything that would fight a reading
+   tool: no rotation or skew, no stacked text shadows, no gradients, and
+   Forge's type sizes, line heights and spacing — nothing under 13px.
+
+   One job per colour. Pink marks what can be acted on (links, the primary
+   button, the selection bar, focus) and work in progress; green is done;
+   the removal and error ink is a warm coral in dark and a deep brick in
+   light, so it differs from the pink in lightness as well as hue (theme-
+   system: *The accent is not mistaken for an error*). The legibility floors
+   are enforced by src/themeContrast.test.ts, not recorded here.
+
+   Dark is the brand's native scheme; light is the same page printed —
+   white paper, black ink.
+   ===================================================================== */
+
+[data-theme="avant"] {
+    /* ---- Color — light scheme ---- */
+    --bg: #f5f5f5;
+    --surface: #ffffff;
+    --surface-2: #ebebeb;
+    --surface-3: #dedede;
+    --border: #d4d4d4;
+    --border-strong: #6b6b6b;
+    --text: #0a0a0a;
+    --text-muted: #474747;
+    --text-faint: #5c5c5c;
+
+    --accent: #cc0e47;
+    --accent-hover: #a8003a;
+    --accent-active: #8c0030;
+    --accent-strong: #ff3366;
+    --accent-tint: #ffe9ef;
+    --accent-tint-strong: #ffd6e0;
+    --accent-glow: transparent;
+    --on-accent: #000000;
+    --primary-fill-hover: #ff6690;
+    --primary-fill-active: #e62958;
+
+    --ok: #005c34;
+    --ok-strong: #005c34;
+    --ok-tint: #e3f5ec;
+    --ok-tint-strong: #cfeedd;
+    --warn: #701200;
+    --meter-caution: #c79a00;
+
+    --warn-tint: #fbe9e4;
+    --accent-rule: #e0507a;
+    --accent-line: #f3a9bd;
+    --swatch-ring: rgba(0, 0, 0, 0.25);
+    --scrim: rgba(10, 10, 10, 0.6);
+
+    /* ---- Type: Forge's sizes, nothing under 13px ---- */
+    --text-3xs: 13px;
+    --text-2xs: 13px;
+    --text-xs: 13px;
+    --text-sm: 14px;
+    --text-base: 15px;
+    --text-md: 15px;
+    --text-lg: 17px;
+    --text-xl: 22px;
+    --text-2xl: 30px;
+    --text-floor: 13px;
+
+    --font-ui:
+        "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+    --font-mono:
+        "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Monaco,
+        Consolas, monospace;
+    --font-doc: var(--font-ui);
+
+    --leading-tight: 1.5;
+    --leading-prose: 1.6;
+    --leading-code: 1.6;
+
+    --doc-size: 17px;
+    --doc-h1: 34px;
+    --doc-h2: 22px;
+    --doc-h3: 18px;
+    --doc-h4: 15px;
+    --doc-heading-weight: 800;
+    --doc-heading-tracking: -0.01em;
+    /* A ruled page: the two top heading levels sit on an ink rule. */
+    --doc-heading-rule: 2px solid var(--text);
+
+    /* Section labels: uppercase, widely tracked (and mono, below). */
+    --label-transform: uppercase;
+    --label-tracking-tight: 0.04em;
+    --label-tracking: 0.06em;
+    --label-tracking-wide: 0.08em;
+    --label-tracking-wider: 0.1em;
+
+    /* Inline code: a square neutral chip with a hairline. */
+    --code-fg: var(--text);
+    --code-bg: var(--surface-2);
+    --code-border: var(--border-width) solid var(--border);
+    --code-pad: 1px 6px;
+    --code-radius: 0;
+    --code-weight: 500;
+    --code-size: max(0.9em, 13px);
+
+    /* ---- Radii: none ---- */
+    --radius-sm: 0;
+    --radius: 0;
+    --radius-md: 0;
+
+    --chip-pad-x: var(--space-2);
+
+    --task-mark-radius: 0;
+    --task-mark-radius-open: 0;
+
+    /* ---- Depth: hard offsets, never a blur. Cards and wells stay level;
+       what floats (a popover, a toast, a lifted well) throws a block of the
+       hairline tone, and the primary button a block of ink. ---- */
+    --border-hairline-top: transparent;
+    --shadow-0: none;
+    --shadow-1: 0 0 0 0 transparent;
+    --shadow-2: 3px 3px 0 0 var(--border);
+    --shadow-3: 6px 6px 0 0 var(--border-strong);
+    --sidebar-edge: 0 0 0 0 transparent;
+    --rail-edge: 0 0 0 0 transparent;
+    --shadow-accent: 3px 3px 0 0 #0a0a0a;
+    --shadow-accent-strong: 5px 5px 0 0 #0a0a0a;
+    --glow-ok: 0 0 0 0 transparent;
+    --shadow-focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+    /* ---- Selection: a neutral fill behind the pink bar ---- */
+    --selection-fill: var(--surface-3);
+    --selection-fill-hover: #d4d4d4;
+    --selection-edge: var(--accent-strong);
+    --selection-glow: 0 0 0 0 transparent;
+    --selection-link: var(--accent-hover);
+
+    --heat-0: var(--surface-2);
+    --heat-1: #ffd6e0;
+    --heat-2: #ff9db5;
+    --heat-3: #ff6690;
+    --heat-4: #e0124e;
+    --heat-dim: 1;
+
+    /* The brand's four colours, one per token class, darkened for paper. */
+    --hl-keyword: #b80040;
+    --hl-string: #005c34;
+    --hl-number: #755800;
+    --hl-type: #1f3fcc;
+    --hl-title: var(--text);
+    --hl-comment: var(--text-faint);
+    --hl-comment-on-tint: #4f4f4f;
+
+    --diff-context-bg: var(--surface);
+    --diff-added-bg: #e0f5ea;
+    --diff-removed-bg: #fbe6e1;
+    --diff-filler-bg: #efefef;
+    --diff-added-ink: var(--ok-strong);
+    --diff-removed-ink: var(--warn);
+    --diff-image-check-a: #ffffff;
+    --diff-image-check-b: #e6e6e6;
+
+    --ws-swatch-indigo: hsl(243 70% 60%);
+    --ws-swatch-blue:   hsl(208 75% 55%);
+    --ws-swatch-teal:   hsl(174 60% 45%);
+    --ws-swatch-green:  hsl(146 55% 45%);
+    --ws-swatch-amber:  hsl(43  85% 55%);
+    --ws-swatch-orange: hsl(22  85% 55%);
+    --ws-swatch-rose:   hsl(350 75% 60%);
+    --ws-swatch-purple: hsl(280 60% 60%);
+
+    --ws-text-indigo: hsl(243 70% 58%);
+    --ws-text-blue:   hsl(208 75% 40%);
+    --ws-text-teal:   hsl(174 60% 29%);
+    --ws-text-green:  hsl(146 55% 30%);
+    --ws-text-amber:  hsl(43  85% 28%);
+    --ws-text-orange: hsl(22  85% 37%);
+    --ws-text-rose:   hsl(350 75% 46%);
+    --ws-text-purple: hsl(280 60% 52%);
+}
+
+[data-theme="avant"][data-scheme="dark"] {
+    /* The brand's own ground: near black, untinted greys, white ink. */
+    --bg: #0a0a0a;
+    --surface: #111111;
+    --surface-2: #1a1a1a;
+    --surface-3: #262626;
+    --border: #2e2e2e;
+    --border-strong: #808080;
+    --text: #ffffff;
+    --text-muted: #cccccc;
+    --text-faint: #a3a3a3;
+
+    --accent: #ff3366;
+    --accent-hover: #ff6690;
+    --accent-active: #e62958;
+    --accent-strong: #ff3366;
+    --accent-tint: #26111a;
+    --accent-tint-strong: #361524;
+    --primary-fill-hover: #ff6690;
+    --primary-fill-active: #e62958;
+
+    --ok: #00ff88;
+    --ok-strong: #00ff88;
+    --ok-tint: #0b2218;
+    --ok-tint-strong: #0f3022;
+    --warn: #ff8a70;
+    --meter-caution: #ffdd00;
+
+    --warn-tint: #2e1712;
+    --accent-rule: #c22a50;
+    --accent-line: #6b1a30;
+    --swatch-ring: rgba(0, 0, 0, 0.4);
+    --scrim: rgba(0, 0, 0, 0.7);
+
+    /* The primary button throws the brand's green block. */
+    --shadow-accent: 3px 3px 0 0 #00ff88;
+    --shadow-accent-strong: 5px 5px 0 0 #00ff88;
+
+    --selection-fill: var(--surface-3);
+    --selection-fill-hover: #303030;
+
+    --heat-1: #3a1422;
+    --heat-2: #7a1f3a;
+    --heat-3: #c22a50;
+    --heat-4: #ff3366;
+
+    /* Pink, green, yellow and blue as the brand has them, the pink and the
+       blue lifted to read as text. */
+    --hl-keyword: #ff6f96;
+    --hl-string: #00ff88;
+    --hl-number: #ffdd00;
+    --hl-type: #8fa8ff;
+    --hl-comment-on-tint: #b0b0b0;
+
+    --diff-added-bg: #0c2a1c;
+    --diff-removed-bg: #331813;
+    --diff-filler-bg: #151515;
+    --diff-image-check-a: #1a1a1a;
+    --diff-image-check-b: #262626;
+
+    --ws-text-indigo: hsl(243 70% 75%);
+    --ws-text-blue:   hsl(208 75% 62%);
+    --ws-text-teal:   hsl(174 60% 48%);
+    --ws-text-green:  hsl(146 55% 50%);
+    --ws-text-amber:  hsl(43  85% 52%);
+    --ws-text-orange: hsl(22  85% 60%);
+    --ws-text-rose:   hsl(350 75% 70%);
+    --ws-text-purple: hsl(280 60% 74%);
+}
+
+/* =====================================================================
+   Structural rules — what Avant restyles beyond its tokens.
+   ===================================================================== */
+
+/* Titles in the brand's display face, in capitals: a document's two top
+   levels, and the Settings and dashboard page titles. The face has one weight, published at 400, so the rule asks for
+   400 and no bold is synthesised over it. Everything from h3 down — where a
+   spec's long requirement names live — stays in Inter, in sentence case. */
+[data-theme="avant"] :is(.markdown-view :is(h1, h2), .settings-header h1, .dashboard-hero-greeting-text h1) {
+    font-family: "Archivo Black", "Arial Black", var(--font-ui);
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+}
+
+/* The title's rule is the heavy one; a section's is a hairline of the same
+   ink, so the two levels stay apart. */
+[data-theme="avant"] .markdown-view h2 {
+    border-bottom-width: var(--border-width);
+}
+
+/* Section labels are set in mono (case and tracking come from the label
+   tokens). */
+[data-theme="avant"]
+    :is(
+        .pull-request-section-title,
+        .identity-switcher-label,
+        .settings-subheading,
+        .pull-request-view-linked-label,
+        .pull-request-view-heading,
+        .pull-request-view-subheading,
+        .pull-request-review-status-label,
+        .dashboard-panel-title,
+        .dashboard-hero-date,
+        .haul-label,
+        .file-browser-copy-label,
+        .graph-day-separator-label,
+        .markdown-view h4,
+        .markdown-view h5,
+        .markdown-view h6
+    ) {
+    font-family: var(--font-mono);
+    font-weight: 600;
+}
+
+/* Boxed tabs and choices: a square outline, and the current one inverted —
+   ink ground, paper label — so it reads without the accent. */
+[data-theme="avant"] :is(.identity-tab, .identity-switcher-option, .settings-choice) {
+    border-color: var(--border-strong);
+    background: transparent;
+}
+
+[data-theme="avant"] :is(.identity-tab, .identity-switcher-option, .settings-choice):hover {
+    border-color: var(--text);
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+[data-theme="avant"]
+    :is(.identity-tab--active, .identity-switcher-option--selected, .settings-choice[aria-checked="true"]) {
+    border-color: var(--text);
+    background: var(--text);
+    color: var(--bg);
+    font-weight: 700;
+}
+
+[data-theme="avant"]
+    :is(.identity-tab--active, .identity-switcher-option--selected, .settings-choice[aria-checked="true"]):hover {
+    border-color: var(--text);
+    background: var(--text);
+    color: var(--bg);
+}
+
+/* The primary button: capitals on the pink, sitting on its block shadow; a
+   press moves it onto the block. */
+[data-theme="avant"] .btn-primary {
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+[data-theme="avant"] .btn-primary:active:not(:disabled) {
+    transform: translate(3px, 3px);
+}
+
+/* A secondary button lifts to a neutral fill and an ink edge, never an
+   accent wash: pink stays the primary action's. */
+[data-theme="avant"] .btn-secondary:hover {
+    border-color: var(--text);
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+/* Work in progress reads in the accent; the green is kept for done. */
+[data-theme="avant"] .task-progress-fill {
+    background: var(--accent-strong);
+}
+
+/* A selected commit takes the row outline too. */
+[data-theme="avant"] .graph-row.selected {
+    box-shadow: inset 0 0 0 1px var(--accent);
+}

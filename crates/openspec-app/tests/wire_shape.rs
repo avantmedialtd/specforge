@@ -2705,13 +2705,14 @@ fn document_width_matches_the_declared_union() {
     assert_wire_value("Full", DocumentWidth::Full, "full");
 }
 
-/// `Theme` — `src/types.ts`: `"forge" | "blueprint" | "folio" | "mycelium"`.
+/// `Theme` — `src/types.ts`: `"forge" | "blueprint" | "folio" | "mycelium" | "avant"`.
 #[test]
 fn theme_matches_the_declared_union() {
     assert_wire_value("Forge", Theme::Forge, "forge");
     assert_wire_value("Blueprint", Theme::Blueprint, "blueprint");
     assert_wire_value("Folio", Theme::Folio, "folio");
     assert_wire_value("Mycelium", Theme::Mycelium, "mycelium");
+    assert_wire_value("Avant", Theme::Avant, "avant");
 }
 
 /// `ColorScheme` — `src/types.ts`: `"system" | "light" | "dark"`.

@@ -22,7 +22,7 @@ export default function Settings() {
                 <p>
                     Choose how SpecForge looks. A <strong>theme</strong> sets the colours, the
                     typefaces, the type sizes and how selection, labels, tabs and code are drawn;
-                    every theme comes in a light and a dark scheme. There are four:
+                    every theme comes in a light and a dark scheme. There are five:
                 </p>
                 <ul>
                     <li>
@@ -40,6 +40,11 @@ export default function Settings() {
                     <li>
                         <strong>Mycelium</strong> — cool indigo with soft depth and glow, at Forge&rsquo;s
                         sizes and spacing, with Meslo for code and identifiers.
+                    </li>
+                    <li>
+                        <strong>Avant</strong> — Avant Media&rsquo;s black and white, with hot pink
+                        kept for actions, square corners, hard offset shadows and Archivo Black
+                        headings.
                     </li>
                 </ul>
                 <p>

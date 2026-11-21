@@ -285,6 +285,9 @@ pub enum Theme {
     /// Meslo. Called Classic, then Ink, before it shipped; neither is an
     /// alias.
     Mycelium,
+    /// Avant Media's black-and-white editorial look: hot pink for actions,
+    /// square corners, hard offset shadows, Archivo Black headings.
+    Avant,
 }
 
 impl Theme {
@@ -294,6 +297,7 @@ impl Theme {
             Some("blueprint") => Self::Blueprint,
             Some("folio") => Self::Folio,
             Some("mycelium") => Self::Mycelium,
+            Some("avant") => Self::Avant,
             _ => Self::Forge,
         }
     }
@@ -2511,6 +2515,7 @@ mod tests {
             (Theme::Blueprint, "blueprint"),
             (Theme::Folio, "folio"),
             (Theme::Mycelium, "mycelium"),
+            (Theme::Avant, "avant"),
         ] {
             let json = serde_json::to_string(&theme).unwrap();
             assert_eq!(

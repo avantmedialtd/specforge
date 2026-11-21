@@ -783,7 +783,7 @@ export type DocumentWidth = "compact" | "default" | "wide" | "full"
 /// Selectable Preference*). Forge is the default. No codegen: these four
 /// strings and that enum's `rename_all` output are kept matched by hand, and
 /// pinned there by `crates/openspec-app/tests/wire_shape.rs`.
-export type Theme = "forge" | "blueprint" | "folio" | "mycelium"
+export type Theme = "forge" | "blueprint" | "folio" | "mycelium" | "avant"
 
 /// Which of a theme's schemes renders, mirroring `ColorScheme` in the same
 /// file: the operating system's (`"system"`, the default) or an explicit

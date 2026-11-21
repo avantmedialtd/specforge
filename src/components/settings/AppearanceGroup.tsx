@@ -13,6 +13,7 @@ export const THEME_CARDS: ReadonlyArray<{ id: Theme; name: string; blurb: string
     { id: "blueprint", name: "Blueprint", blurb: "Drafting blue, square edges, mono labels." },
     { id: "folio", name: "Folio", blurb: "Serif documents, quiet chrome." },
     { id: "mycelium", name: "Mycelium", blurb: "Cool indigo, soft depth and glow." },
+    { id: "avant", name: "Avant", blurb: "Black and white, hot pink actions, hard edges." },
 ]
 
 export const SCHEME_OPTIONS: readonly ChoiceOption<ColorScheme>[] = [

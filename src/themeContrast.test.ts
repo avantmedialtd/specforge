@@ -14,6 +14,7 @@ import {
     parseColor,
     parseDeclarations,
     resolveValue,
+    stripComments,
     themeTokens,
     tokenColor,
     type Scheme,
@@ -29,7 +30,7 @@ function sheet(relative: string): string {
     return readFileSync(fileURLToPath(new URL(`./styles/${relative}`, import.meta.url)), "utf8")
 }
 
-const THEME_IDS = ["forge", "blueprint", "folio", "mycelium"] as const
+const THEME_IDS = ["forge", "blueprint", "folio", "mycelium", "avant"] as const
 type ThemeId = (typeof THEME_IDS)[number]
 const THEMES = Object.fromEntries(
     THEME_IDS.map((id) => [id, themeTokens(sheet(`themes/${id}.css`), id)]),
@@ -339,6 +340,39 @@ describe("Mycelium is as spacious as Forge", () => {
             expect(tokens["--font-ui"]).toStartWith('"Inter Variable",')
             expect(resolveValue(tokens["--font-doc"]!, tokens, SHARED)).toBe(tokens["--font-ui"])
         }
+    })
+})
+
+/// Avant takes Avant Media's ink and edges and keeps SpecForge's reading scale
+/// (`theme-system`: *Avant stays a reading surface*, *Avant's pink is not
+/// mistaken for an error*).
+describe("Avant keeps the reading scale and its pink apart from an error", () => {
+    for (const scheme of SCHEMES) {
+        test(`every type-size, line-height and spacing token resolves to Forge's, ${scheme}`, () => {
+            const resolved = (theme: ThemeId) =>
+                SPACIOUS_TOKENS.map((name) => [name, resolveValue(THEMES[theme][scheme][name]!, THEMES[theme][scheme], SHARED)])
+            expect(resolved("avant")).toEqual(resolved("forge"))
+        })
+
+        test(`the accent and the removal colour differ in lightness, ${scheme}`, () => {
+            const tokens = THEMES.avant[scheme]
+            const accent = lightness(tokenColor("--accent", tokens, SHARED))
+            const removal = lightness(tokenColor("--diff-removed-ink", tokens, SHARED))
+            expect(Math.abs(accent - removal)).toBeGreaterThanOrEqual(LIGHTNESS_STEP)
+        })
+
+        test(`corners are square, ${scheme}`, () => {
+            const tokens = THEMES.avant[scheme]
+            for (const name of ["--radius-sm", "--radius", "--radius-md", "--code-radius", "--task-mark-radius"]) {
+                expect(resolveValue(tokens[name]!, tokens, SHARED)).toBe("0")
+            }
+        })
+    }
+
+    // The brand's transforms, stacked text shadows and gradients are what the
+    // theme leaves behind; the one transform it has is the button's press.
+    test("nothing is rotated, skewed, text-shadowed or filled with a gradient", () => {
+        expect(stripComments(sheet("themes/avant.css"))).not.toMatch(/rotate|skew|text-shadow|gradient/)
     })
 })
 

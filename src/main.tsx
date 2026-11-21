@@ -18,6 +18,7 @@ import "./styles/themes/forge.css"
 import "./styles/themes/blueprint.css"
 import "./styles/themes/folio.css"
 import "./styles/themes/mycelium.css"
+import "./styles/themes/avant.css"
 
 // Each window kind loads its own root, and only its own: a reader, a
 // pull-request or a zoom window never loads the main window's dashboard,

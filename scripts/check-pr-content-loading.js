@@ -213,7 +213,7 @@ f.reset("github",{autoShowImages:true,autoLoadLargeDiffs:true});
         for (const surface of ["main", "detached"]) {
         await page.evaluate(surface => window.fixture.reset("github", { autoShowImages: true, autoLoadLargeDiffs: true }, surface), surface)
         await page.waitForFunction(() => window.fixture.sent.filter(item => item.command === "get_pull_request_content_image").length === 3 && window.fixture.active === 0)
-        for (const theme of ["forge", "blueprint", "folio", "mycelium"]) {
+        for (const theme of ["forge", "blueprint", "folio", "mycelium", "avant"]) {
             for (const scheme of ["light", "dark"]) {
                 await page.evaluate(value => window.fixture.appearance(value), { theme, scheme })
                 for (const width of [1560, 480]) {

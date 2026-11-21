@@ -496,7 +496,7 @@ This host boundary SHALL apply whether the active credential comes from the envi
 
 The Appearance group SHALL offer two choices and a sample:
 
-- **Theme** — one card per theme of the `theme-system` capability, in the order Forge, Blueprint, Folio, Mycelium. Each card SHALL show the theme's name, a one-line description and a preview rendered in that theme's own tokens and in the currently resolved scheme, so that a card looks like the theme it selects. Exactly one card SHALL be marked as selected, and the marking SHALL NOT rely on colour alone.
+- **Theme** — one card per theme of the `theme-system` capability, in the order Forge, Blueprint, Folio, Mycelium, Avant. Each card SHALL show the theme's name, a one-line description and a preview rendered in that theme's own tokens and in the currently resolved scheme, so that a card looks like the theme it selects. Exactly one card SHALL be marked as selected, and the marking SHALL NOT rely on colour alone.
 - **Scheme** — a choice among System, Light and Dark, with a line of text stating that System follows the operating system.
 - **Sample** — a short fragment of document content (a heading, a sentence containing inline code and a link) rendered in the active appearance.
 
@@ -532,4 +532,10 @@ Both choices SHALL be operable from the keyboard, and each card SHALL expose its
 - **WHEN** the user moves focus to a theme card with the keyboard and activates it
 - **THEN** that theme is selected
 - **AND** assistive technology is told the card's name and that it is selected
+
+#### Scenario: Avant is the fifth card
+
+- **WHEN** the Appearance group is shown
+- **THEN** five theme cards are offered, the last of them Avant
+- **AND** the Avant card's preview is rendered with Avant's colours and square corners
 

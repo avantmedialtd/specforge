@@ -32,7 +32,7 @@ export type ResolvedScheme = "light" | "dark"
 
 /// The themes, in the order Settings offers them (`settings-view`: *The
 /// Appearance Group Offers Theme and Scheme*).
-export const THEMES: readonly Theme[] = ["forge", "blueprint", "folio", "mycelium"]
+export const THEMES: readonly Theme[] = ["forge", "blueprint", "folio", "mycelium", "avant"]
 
 /// The scheme choices, in the order Settings offers them.
 export const SCHEMES: readonly ColorScheme[] = ["system", "light", "dark"]

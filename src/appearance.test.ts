@@ -42,8 +42,8 @@ function fakeRoot(): StampTarget & { attributes: Map<string, string> } {
 }
 
 describe("the catalogue", () => {
-    test("offers the four themes and three schemes in Settings' order, Forge and System first", () => {
-        expect([...THEMES]).toEqual(["forge", "blueprint", "folio", "mycelium"])
+    test("offers the five themes and three schemes in Settings' order, Forge and System first", () => {
+        expect([...THEMES]).toEqual(["forge", "blueprint", "folio", "mycelium", "avant"])
         expect([...SCHEMES]).toEqual(["system", "light", "dark"])
         expect(DEFAULT_APPEARANCE).toEqual({ theme: "forge", scheme: "system" })
     })

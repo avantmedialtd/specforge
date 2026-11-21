@@ -23,7 +23,10 @@
    its four faces (Mycelium); Geist ~29KB and Geist Mono ~23KB (Forge); IBM Plex
    Sans ~46KB and IBM Plex Mono 400/500/600 ~45KB (Blueprint); Instrument
    Sans ~30KB, Newsreader ~132KB with its optical-size axis and JetBrains
-   Mono ~40KB (Folio). */
+   Mono ~40KB (Folio); Archivo Black ~19KB (Avant, which sets its interface
+   in Mycelium's Inter and its code in Folio's JetBrains Mono).
+
+   - Archivo Black: SIL Open Font License 1.1, as published by @fontsource. */
 
 /* ---- Mycelium: Inter + Meslo LG M ---- */
 
@@ -153,6 +156,19 @@
     font-family: "Newsreader Variable";
     src: url("./assets/fonts/Newsreader-Variable.woff2") format("woff2");
     font-weight: 200 800;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* ---- Avant: Archivo Black for display headings ---- */
+
+/* One weight, and it is the black one: the face is declared at 400, as
+   upstream publishes it, and the rules that use it ask for 400 so no bold is
+   synthesised on top. */
+@font-face {
+    font-family: "Archivo Black";
+    src: url("./assets/fonts/ArchivoBlack-400.woff2") format("woff2");
+    font-weight: 400;
     font-style: normal;
     font-display: swap;
 }

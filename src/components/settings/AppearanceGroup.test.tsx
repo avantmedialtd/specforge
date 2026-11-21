@@ -130,12 +130,12 @@ async function mount() {
 }
 
 describe("the Appearance group", () => {
-    test("offers the four themes in order, each previewed in its own theme, the stored one pressed", async () => {
+    test("offers the five themes in order, each previewed in its own theme, the stored one pressed", async () => {
         const desktop = installDesktop({ theme: "blueprint", scheme: "light" })
         const mounted = await mount()
         try {
             const cards = THEME_CARDS.map((entry) => card(mounted.container, entry.id))
-            expect(THEME_CARDS.map((entry) => entry.name)).toEqual(["Forge", "Blueprint", "Folio", "Mycelium"])
+            expect(THEME_CARDS.map((entry) => entry.name)).toEqual(["Forge", "Blueprint", "Folio", "Mycelium", "Avant"])
             // Each preview names its own theme and the scheme the window is
             // resolved to (`settings-view`: *A card previews its own theme*).
             const previews = mounted.container
@@ -146,11 +146,12 @@ describe("the Appearance group", () => {
                 "blueprint",
                 "folio",
                 "mycelium",
+                "avant",
             ])
             expect(previews.every((preview) => preview.getAttribute("data-scheme") === "light")).toBe(true)
             // The stored appearance came from the authoritative read.
             expect(pressed(mounted.container)).toEqual(["blueprint"])
-            expect(cards.length).toBe(4)
+            expect(cards.length).toBe(5)
             expect(stamp()).toEqual(["blueprint", "light"])
             expect(desktop.calls("get_appearance")).toHaveLength(1)
             // Named by its theme alone, with its blurb as the description.
