@@ -52,30 +52,25 @@ test("the active PR is marked canonically and rows expose their PR number", () =
     }))
     expect(html).toContain('aria-current="page"')
     expect(html).toContain("acme/api #7")
-    expect(html).toContain('value="requested"')
-    const bb = renderToStaticMarkup(createElement(PullRequestPanel, {
-        provider: "bitbucket", panel: bitbucket(), onOpenPullRequest() {},
-    }))
-    expect(bb).not.toContain('value="requested"')
 })
 
-test("both providers offer status filters without a search field or empty search row", () => {
+test("both providers hide status filters by default without leaving an empty controls row", () => {
     for (const panel of [bitbucket(), github()]) {
         const html = renderToStaticMarkup(createElement(PullRequestPanel, {
             provider: panel.provider, panel, onOpenPullRequest() {},
         }))
         expect(html).not.toContain("<input")
         expect(html).not.toContain("Search pull requests")
-        expect(html).toContain('<div class="pr-panel-controls"><select aria-label="Filter pull requests"')
-        for (const value of ["all", "failing", "conflicts", "drafts"]) {
-            expect(html).toContain(`value="${value}"`)
-        }
+        expect(html).not.toContain("<select")
+        expect(html).not.toContain('class="pr-panel-controls"')
+        expect(html).toContain(`aria-label="Filter ${PANEL_TITLES[panel.provider]}"`)
+        expect(html).toContain('aria-expanded="false"')
         expect(html).not.toContain(" matching")
         expect(html).not.toContain(">Clear</button>")
     }
 })
 
-describe("filter-only panel interactions", () => {
+describe("optional panel filters", () => {
     let dom: ReturnType<typeof installFakeDom>
     let transport: ReturnType<typeof installFakeTransport>
     let createRoot: typeof import("react-dom/client").createRoot
@@ -94,6 +89,18 @@ describe("filter-only panel interactions", () => {
         const key = Object.keys(element).find((name) => name.startsWith("__reactProps$"))
         if (!key) { throw new Error("the element carries no React props") }
         return (element as unknown as Record<string, Record<string, unknown>>)[key]!
+    }
+
+    function filterToggle(container: FakeElement): FakeElement {
+        return container.findAll("button").find((button) =>
+            button.getAttribute("class") === "pull-request-panel-filter-toggle",
+        )!
+    }
+
+    async function toggleFilters(container: FakeElement) {
+        await act(async () => {
+            ;(props(filterToggle(container)).onClick as () => void)()
+        })
     }
 
     async function selectFilter(container: FakeElement, value: string) {
@@ -143,6 +150,19 @@ describe("filter-only panel interactions", () => {
                 const headerTotal = count.textContent
                 expect(listedIds(container)).toEqual(["1", "2", "3"])
                 expect(container.findAll("input")).toHaveLength(0)
+                expect(container.findAll("select")).toHaveLength(0)
+                expect(filterToggle(container).getAttribute("aria-expanded")).toBe("false")
+                await toggleFilters(container)
+                expect(filterToggle(container).getAttribute("aria-expanded")).toBe("true")
+                const controls = container.findAll("div").find((element) =>
+                    element.getAttribute("class") === "pr-panel-controls",
+                )!
+                expect(filterToggle(container).getAttribute("aria-controls")).toBe(controls.getAttribute("id"))
+                expect(container.findAll("option").map((option) => option.value)).toEqual([
+                    "all", "failing", "conflicts", "drafts",
+                    ...(provider === "github" ? ["requested"] : []),
+                ])
+                expect(listedIds(container)).toEqual(["1", "2", "3"])
                 const focusedRow = container.findAll("a")[0]!
                 focusedRow.focus()
                 const urgent = { ...rows[0]!, checks: "failing" as const }
@@ -186,6 +206,25 @@ describe("filter-only panel interactions", () => {
                 expect(container.textContent).not.toContain(PANEL_MESSAGES[provider].empty)
                 expect(container.textContent).not.toContain(PANEL_MESSAGES[provider].unauthenticated)
                 expect(count.textContent).toBe(headerTotal)
+                const toggle = filterToggle(container)
+                toggle.focus()
+                await toggleFilters(container)
+                expect(filterToggle(container)).toBe(toggle)
+                expect(dom.document.activeElement).toBe(toggle)
+                expect(toggle.getAttribute("aria-expanded")).toBe("false")
+                expect(container.findAll("select")).toHaveLength(0)
+                expect(container.findAll("div").some((element) =>
+                    element.getAttribute("class") === "pr-panel-controls",
+                )).toBe(false)
+                expect(listedIds(container)).toEqual(["1", "2", "3"])
+                expect(container.textContent).not.toContain(" matching")
+                expect(container.textContent).not.toContain("No matching pull requests.")
+                expect(container.findAll("button").some((button) => button.textContent === "Clear")).toBe(false)
+                expect(count.textContent).toBe(headerTotal)
+                await toggleFilters(container)
+                expect(props(container.findAll("select")[0]!).value).toBe("all")
+                expect(listedIds(container)).toEqual(["1", "2", "3"])
+                await selectFilter(container, "failing")
                 await clearFilter(container)
                 expect(listedIds(container)).toEqual(["1", "2", "3"])
                 expect(transport.calls).toHaveLength(readsBefore)
@@ -194,6 +233,42 @@ describe("filter-only panel interactions", () => {
             }
         })
     }
+
+    test("each provider reveals filters independently and remounts with filters off", async () => {
+        const container = dom.document.createElement("div")
+        const root = createRoot(container as unknown as Element)
+        const panels = [github(), bitbucket()]
+        const renderPanels = (key: string) => createElement("div", { key }, ...panels.map((panel) =>
+            createElement(PullRequestPanel, {
+                key: panel.provider, provider: panel.provider, panel, onOpenPullRequest() {},
+            }),
+        ))
+        try {
+            await act(async () => root.render(renderPanels("initial")))
+            const [gh, bb] = container.findAll("section")
+            await toggleFilters(gh!)
+            expect(gh!.findAll("select")).toHaveLength(1)
+            expect(bb!.findAll("select")).toHaveLength(0)
+            expect(filterToggle(bb!).getAttribute("aria-expanded")).toBe("false")
+            await selectFilter(gh!, "failing")
+            await toggleFilters(bb!)
+            expect(props(gh!.findAll("select")[0]!).value).toBe("failing")
+            await selectFilter(bb!, "drafts")
+            await toggleFilters(gh!)
+            expect(gh!.findAll("select")).toHaveLength(0)
+            expect(bb!.findAll("select")).toHaveLength(1)
+            expect(props(bb!.findAll("select")[0]!).value).toBe("drafts")
+            expect(listedIds(gh!)).toEqual(["1", "2"])
+            expect(listedIds(bb!)).toEqual([])
+            await act(async () => root.render(renderPanels("remounted")))
+            expect(container.findAll("select")).toHaveLength(0)
+            const [remountedGh, remountedBb] = container.findAll("section")
+            expect(listedIds(remountedGh!)).toEqual(["1", "2"])
+            expect(listedIds(remountedBb!)).toEqual(["1"])
+        } finally {
+            await act(async () => root.unmount())
+        }
+    })
 })
 
 function row(overrides: Partial<PullRequestSummary> = {}): PullRequestSummary {

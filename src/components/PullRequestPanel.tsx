@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useId, useState } from "react"
 import type { UnlistenFn } from "@tauri-apps/api/event"
 import {
     getBitbucketPullRequests,
@@ -25,7 +25,7 @@ import type {
     ReviewSummary,
     UnavailableReason,
 } from "../types"
-import { ChevronDown, ChevronRight, CommentIcon } from "./icons"
+import { ChevronDown, ChevronRight, CommentIcon, Filter } from "./icons"
 import { PullRequestControl } from "./PullRequestControl"
 
 /// Collapsed-or-expanded is per-viewer view state, persisted like pane
@@ -437,7 +437,10 @@ export function PullRequestPanel({
 }) {
     const [collapsed, setCollapsed] = useState(() => readCollapsed(provider))
     const [nowMs, setNowMs] = useState(() => Date.now())
-    const [filter, setFilter] = useState<PanelFilter>("all")
+    // null hides the controls and shows every row, so hiding filters also
+    // clears them instead of leaving an invisible filter active.
+    const [filter, setFilter] = useState<PanelFilter | null>(null)
+    const filterControlsId = useId()
     const [ordered, setOrdered] = useState(() => ({ panel, sections: panel ? panelSections(panel) : [] }))
     let sections = ordered.sections
     if (ordered.panel !== panel) {
@@ -449,10 +452,10 @@ export function PullRequestPanel({
     }
     const filteredSections = sections.map((section) => ({
         ...section,
-        rows: section.rows.filter((pr) => matchesPanel(pr, filter, section.key === "review-requested")),
+        rows: section.rows.filter((pr) => matchesPanel(pr, filter ?? "all", section.key === "review-requested")),
     })).filter((section) => section.rows.length > 0)
     const filteredCount = filteredSections.reduce((total, section) => total + section.rows.length, 0)
-    const filtering = filter !== "all"
+    const filtering = filter !== null && filter !== "all"
 
     // A fresh snapshot restarts the relative-time clock, as a fresh read did
     // when the panel fetched its own.
@@ -486,25 +489,40 @@ export function PullRequestPanel({
             className={`pull-request-panel${panel.snapshot.stale ? " pull-request-panel--stale" : ""}`}
             aria-label={title}
         >
-            <button
-                type="button"
-                className="pull-request-panel-header"
-                aria-expanded={!collapsed}
-                onClick={() => setCollapsed((c) => !c)}
-                title={panelHeaderTitle(panel)}
-            >
-                {collapsed ? (
-                    <ChevronRight width={14} height={14} />
-                ) : (
-                    <ChevronDown width={14} height={14} />
+            <div className="pull-request-panel-heading">
+                <button
+                    type="button"
+                    className="pull-request-panel-header"
+                    aria-expanded={!collapsed}
+                    onClick={() => setCollapsed((c) => !c)}
+                    title={panelHeaderTitle(panel)}
+                >
+                    {collapsed ? (
+                        <ChevronRight width={14} height={14} />
+                    ) : (
+                        <ChevronDown width={14} height={14} />
+                    )}
+                    <span className="pull-request-panel-title">{title}</span>
+                    {counts && (
+                        <span className="pull-request-panel-count" aria-label={counts.label}>
+                            {counts.text}
+                        </span>
+                    )}
+                </button>
+                {!collapsed && body === "rows" && (
+                    <button
+                        type="button"
+                        className="pull-request-panel-filter-toggle"
+                        aria-label={`Filter ${title}`}
+                        aria-expanded={filter !== null}
+                        aria-controls={filter !== null ? filterControlsId : undefined}
+                        title={filter === null ? "Show filters" : "Hide filters"}
+                        onClick={() => setFilter((current) => current === null ? "all" : null)}
+                    >
+                        <Filter />
+                    </button>
                 )}
-                <span className="pull-request-panel-title">{title}</span>
-                {counts && (
-                    <span className="pull-request-panel-count" aria-label={counts.label}>
-                        {counts.text}
-                    </span>
-                )}
-            </button>
+            </div>
             {!collapsed &&
                 (body === "rows" ? (
                     // One scroll container for the whole body — section
@@ -512,7 +530,7 @@ export function PullRequestPanel({
                     // than clipping rows, and two sections never add up to two
                     // height caps.
                     <div className="pull-request-list">
-                        <div className="pr-panel-controls">
+                        {filter !== null && <div className="pr-panel-controls" id={filterControlsId}>
                             <select aria-label="Filter pull requests" value={filter}
                                 onChange={(event) => setFilter(event.currentTarget.value as PanelFilter)}>
                                 <option value="all">All pull requests</option>
@@ -526,7 +544,7 @@ export function PullRequestPanel({
                                 <button type="button" className="pull-request-view-action"
                                     onClick={() => setFilter("all")}>Clear</button>
                             </div>}
-                        </div>
+                        </div>}
                         {filteredCount === 0 && <p className="pull-request-panel-message">No matching pull requests.</p>}
                         {filteredSections.map((section) => (
                             <div key={section.key} className="pull-request-section">

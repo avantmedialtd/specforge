@@ -77,6 +77,14 @@ export function ChevronDown(props: IconProps) {
     )
 }
 
+export function Filter(props: IconProps) {
+    return (
+        <Svg {...props}>
+            <path d="M4 4h16l-6 7v7l-4 2v-9z" />
+        </Svg>
+    )
+}
+
 /// Gear (Lucide `settings`). Paired with a text label in the sidebar
 /// footer so the 8-tooth silhouette has room to read at 18px+.
 export function Settings(props: IconProps) {
