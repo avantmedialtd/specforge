@@ -1615,6 +1615,35 @@ function expectSameElements(actual: readonly FakeElement[], expected: readonly F
 }
 
 describe("a host slot update re-renders only its file", () => {
+    test("loading rebuilds only that file's slots and keeps earlier loaded identities stable", async () => {
+        const files = [
+            fileAt("src/a.ts", { content: { kind: "withheld" } }),
+            fileAt("src/b.ts", { content: { kind: "withheld" } }),
+            fileAt("src/c.ts"),
+        ]
+        const host = hostOf(files)
+        const mounted = await mount(files, host.slots(), {
+            loadFile: candidate => Promise.resolve(fileAt(fileKey(candidate))),
+        })
+        try {
+            await press(byClass(sectionOf(mounted.container, "src/a.ts"), "diff-load")[0]!)
+            expect(host.builds.get("src/a.ts")).toBe(2)
+            expect(host.builds.get("src/b.ts")).toBe(1)
+            expect(host.builds.get("src/c.ts")).toBe(1)
+            const rows = byClass(sectionOf(mounted.container, "src/a.ts"), "diff-row")
+            host.resetCalls()
+            await press(byClass(sectionOf(mounted.container, "src/b.ts"), "diff-load")[0]!)
+            expect(host.builds.get("src/a.ts")).toBe(2)
+            expect(host.builds.get("src/b.ts")).toBe(2)
+            expect(host.builds.get("src/c.ts")).toBe(1)
+            expect(host.calls("src/a.ts")).toBe(0)
+            expect(host.calls("src/c.ts")).toBe(0)
+            expectSameElements(byClass(sectionOf(mounted.container, "src/a.ts"), "diff-row"), rows)
+        } finally {
+            await mounted.unmount()
+        }
+    })
+
     test("changing one file's header, preamble and line re-renders that file alone", async () => {
         const files = [fileAt("src/a.ts"), fileAt("src/b.ts"), fileAt("src/c.ts")]
         const host = hostOf(files)

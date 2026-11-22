@@ -119,6 +119,8 @@ export interface DiffViewProps {
     /// preamble, its per-hunk slots and the hunks the host folds, such as a
     /// pull request's marks and threads; undefined for a file that has none.
     /// Commit detail passes none, and its files render as they always have.
+    /// The file carries its loaded content once a withheld read settles, with
+    /// a stable identity until that content or the host's model changes.
     ///
     /// The host guarantees that a file's `FileSlots`, and each value in it,
     /// keeps its identity while that file's own inputs are unchanged; the view
@@ -222,7 +224,7 @@ export interface DiffNavigation {
 type FileLoad =
     | { status: "loading" }
     | { status: "failed"; message: string }
-    | { status: "loaded"; content: DiffContent }
+    | { status: "loaded"; file: DiffFile }
 
 /// An image file's read of its versions, by its key.
 type ImageRead =
@@ -478,7 +480,7 @@ export function DiffView({
         }
         settle({ status: "loading" })
         const promise = Promise.resolve().then(() => loadFileRef.current(file)).then(
-            (loaded) => settle({ status: "loaded", content: loaded.content }),
+            (loaded) => settle({ status: "loaded", file: { ...file, content: loaded.content } }),
             (error: unknown) => settle({ status: "failed", message: String(error) }),
         ).finally(() => running.delete(`diff:${key}`))
         running.set(`diff:${key}`, promise)
@@ -587,7 +589,7 @@ export function DiffView({
             const file = files.find(f => fileKey(f) === key)
             if (!file || key === undefined) { continue }
             const loaded = loads.get(key)
-            const content = loaded?.status === "loaded" ? loaded.content : file.content
+            const content = contentOf(file, loads)
             const image = readImageRef.current && isImageFile({ ...file, content })
             const kind = content.kind === "withheld" ? "diff" : image ? "image" : null
             if (!kind || content.kind === "tooLarge" || isLfsPointerFile({ ...file, content })) { continue }
@@ -640,9 +642,13 @@ export function DiffView({
     // and every section skips its render.
     const allSlotsRef = useRef<ReadonlyMap<string, FileSlots | undefined> | null>(null)
     const allSlots = useMemo(() => {
-        const next = new Map(files.map((file) => [fileKey(file), fileSlots?.(file)] as const))
+        const next = new Map(files.map((file) => {
+            const loaded = loads.get(fileKey(file))
+            const rendered = loaded?.status === "loaded" ? loaded.file : file
+            return [fileKey(file), fileSlots?.(rendered)] as const
+        }))
         return (allSlotsRef.current = reuseMap(allSlotsRef.current, next))
-    }, [files, fileSlots])
+    }, [files, loads, fileSlots])
 
     // The hunk slots alone, which is what fold bookkeeping reads. Kept when
     // every file's `hunks` is the same object, which holds across a host
@@ -977,7 +983,7 @@ export function DiffView({
 /// in place of the withheld content, once it has landed.
 function contentOf(file: DiffFile, loads: ReadonlyMap<string, FileLoad>): DiffContent {
     const load = loads.get(fileKey(file))
-    return load?.status === "loaded" ? load.content : file.content
+    return load?.status === "loaded" ? load.file.content : file.content
 }
 
 /// The scrolling ancestor whose port the sections scroll through. The view

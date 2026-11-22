@@ -1301,7 +1301,7 @@ impl AppService {
         match self.pull_request_details.with_fingerprinted_entry(
             &reference.key(),
             context.fingerprint(),
-            |detail| {
+            |detail, files| {
                 // The gate compared the draft's basis with the commits cached
                 // a moment ago; a detail read that stored newer commits since
                 // must not lend its anchors to a draft still on the old ones.
@@ -1310,7 +1310,7 @@ impl AppService {
                         reason: review_actions::BlockedReason::StaleCommits,
                     });
                 }
-                review_actions::validate_draft_content(&summary, &items, detail)
+                review_actions::validate_draft_content(&summary, &items, detail, files)
             },
         ) {
             Some(Ok(())) => {}
@@ -1566,7 +1566,7 @@ impl AppService {
         let former_basis = current.draft.basis.clone();
         let recovered = self
             .pull_request_details
-            .with_fingerprinted_entry(&reference.key(), context.fingerprint(), |detail| {
+            .with_fingerprinted_entry(&reference.key(), context.fingerprint(), |detail, _| {
                 // The detail the recovered basis was granted from, not one a
                 // read stored since.
                 detail_is_on(detail, &basis).then(|| {
@@ -14274,6 +14274,149 @@ mod tests {
                     .revision,
                 2,
                 "every refused anchored edit left the revision alone"
+            );
+        }
+
+        #[test]
+        fn draft_comments_anchor_to_a_budget_withheld_file_from_the_cache() {
+            let path = "src/large.rs";
+            let original = file(
+                Some(path),
+                Some(path),
+                FileStatus::Modified,
+                vec![
+                    hunk(LineKind::Removed, Some(9), None),
+                    hunk(LineKind::Added, None, Some(10)),
+                ],
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) = seeded(dir.path(), Vec::new(), Vec::new(), false);
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            let mut read = read_detail(
+                &reference().key(),
+                generation,
+                context.fingerprint(),
+                vec![original.clone()],
+                Vec::new(),
+            );
+            let DiffContent::Hunks { hunks } = original.content else {
+                unreachable!()
+            };
+            read.detail.files[0].content = DiffContent::Withheld;
+            read.files = vec![crate::pull_request_detail::CachedFile {
+                withheld: Some(hunks),
+                ..Default::default()
+            }];
+            assert!(svc.pull_request_details.store(read, || true));
+            svc.create_review_draft(&reference()).unwrap();
+            assert!(matches!(
+                svc.pull_request_details
+                    .file(&reference().key(), path, "head", "base"),
+                Ok(crate::pull_request_cache::FileAnswer::Ready(DiffFile {
+                    content: DiffContent::Hunks { .. },
+                    ..
+                }))
+            ));
+            let draft = svc
+                .edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![
+                        inline_input("Old line", path, DiffSide::Old, 9),
+                        inline_input("New line", path, DiffSide::New, 10),
+                    ],
+                )
+                .expect("lines served from the cache are valid draft anchors");
+            assert_eq!(draft.items.len(), 2);
+            let carried = draft
+                .items
+                .into_iter()
+                .map(|item| DraftItemInput::Carried { item })
+                .collect();
+            assert!(svc
+                .edit_review_draft(&reference(), 2, ReviewDecision::Comment, None, carried)
+                .is_ok());
+            assert!(
+                matches!(
+                    svc.pull_request_details
+                        .cached(&reference().key(), false)
+                        .unwrap()
+                        .files[0]
+                        .content,
+                    DiffContent::Withheld
+                ),
+                "anchor validation must not expand the initial detail budget"
+            );
+        }
+
+        #[test]
+        fn draft_comments_anchor_to_a_fetched_patchless_file() {
+            use crate::pull_request_cache::FileAnswer;
+            use crate::pull_request_detail::{CachedFile, FetchPaths, Fetched};
+
+            let path = "src/large.rs";
+            let original = file(
+                Some(path),
+                Some(path),
+                FileStatus::Modified,
+                vec![hunk(LineKind::Added, None, Some(10))],
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let (svc, context) = seeded(dir.path(), Vec::new(), Vec::new(), false);
+            let generation = svc
+                .pull_request_details
+                .generation(PullRequestProvider::Github);
+            let mut read = read_detail(
+                &reference().key(),
+                generation,
+                context.fingerprint(),
+                vec![original.clone()],
+                Vec::new(),
+            );
+            read.detail.files[0].content = DiffContent::Withheld;
+            read.files = vec![CachedFile {
+                fetch: Some(FetchPaths {
+                    old: Some(path.to_string()),
+                    new: Some(path.to_string()),
+                }),
+                ..Default::default()
+            }];
+            assert!(svc.pull_request_details.store(read, || true));
+            svc.create_review_draft(&reference()).unwrap();
+            let edit = || {
+                svc.edit_review_draft(
+                    &reference(),
+                    1,
+                    ReviewDecision::Comment,
+                    None,
+                    vec![inline_input("Fetched line", path, DiffSide::New, 10)],
+                )
+            };
+            assert_eq!(edit(), Err(DraftMutationRefusal::StaleAnchor { at: 0 }));
+            let Ok(FileAnswer::Fetch(fetch)) =
+                svc.pull_request_details
+                    .file(&reference().key(), path, "head", "base")
+            else {
+                panic!("a patchless file needs its versions read")
+            };
+            assert!(svc.pull_request_details.keep_fetched(
+                &reference().key(),
+                &fetch,
+                "merge",
+                Fetched {
+                    content: original.content,
+                    hunks: None
+                },
+                generation,
+                || true,
+            ));
+            assert_eq!(
+                edit().expect("fetched lines are valid anchors").items.len(),
+                1
             );
         }
 

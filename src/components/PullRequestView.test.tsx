@@ -1101,6 +1101,55 @@ function useSplitLayout(): void {
 }
 
 describe("draft comments and replies render where their anchor is", () => {
+    for (const layout of ["unified", "split"] as const) {
+        test(`a loaded large diff offers comments and places its threads and drafts on their lines, ${layout}`, async () => {
+            if (layout === "split") { useSplitLayout() }
+            const path = "src/big.ts"
+            const withheld = changedFile(path, { content: { kind: "withheld" } })
+            const loaded = changedFile(path)
+            const waiting = thread("waiting", { path })
+            const item = placedInlineItem("existing", path, "old", 21)
+            const { editor, opened } = composingEditor({ draft: draftWith([item]) })
+            const transport = installFakeTransport((command) => {
+                if (command !== "get_pull_request_file") { throw new Error(`unexpected ${command}`) }
+                return { kind: "file", file: loaded }
+            })
+            const detail = detailWith([waiting], [withheld, changedFile("src/a.ts")])
+            const mounted = await mountFiles(detail, null, editor)
+            try {
+                const big = sectionOf(mounted.container, path)
+                expect(commentActionLabels(big)).toEqual([])
+                expect(byClass(big, "diff-file-preamble")[0].textContent).toContain("Draft existing")
+                await press(big.findAll("button").find(button => button.textContent === "Load diff")!)
+                expect(big.textContent).toContain("added line")
+                expect(commentActionLabels(big)).toEqual([
+                    `Comment on new line 20 of ${path}`,
+                    `Comment on old line 21 of ${path}`,
+                    `Comment on new line 22 of ${path}`,
+                ])
+                expect(slotLabels(big)).toEqual(["old line 21", "new line 22"])
+                expect(byClass(big, "diff-file-preamble")).toHaveLength(0)
+
+                const label = `Comment on new line 22 of ${path}`
+                await press(named(big, label)!)
+                expect(opened.anchor).toEqual({ path, side: "new", line: 22 })
+                await mounted.setEditor(fakeEditor({ draft: editor.draft, composing: opened.anchor }))
+                const composer = byClass(big, "pull-request-composer-line")[0]
+                expect(composer).toBeDefined()
+                await type(composer.findAll("textarea")[0], "Check this large diff")
+                await mounted.rerender(detail, progressFor([{
+                    ...viewedHunk("src/a.ts"), hunks: [false],
+                }]))
+                expect(byClass(big, "pull-request-composer-line")[0]).toBe(composer)
+                expect(composer.findAll("textarea")[0].value).toBe("Check this large diff")
+                expect(withheld.content.kind).toBe("withheld")
+            } finally {
+                await mounted.unmount()
+                transport.uninstall()
+            }
+        })
+    }
+
     test("a placed draft comment sits in its new-side line slot, unified", async () => {
         const item = placedInlineItem("d1", "src/a.ts", "new", 22)
         const editor = fakeEditor({ draft: draftWith([item]), canInline: false })

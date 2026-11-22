@@ -16,8 +16,11 @@
 //! beyond the one-way digest an action stamp records.
 
 use crate::credential_store::{CredentialSource, ResolvedCredentialContext};
-use crate::pull_request_detail::{file_path, DiffSide, PullRequestDetail, PullRequestReference};
+use crate::pull_request_detail::{
+    file_path, CachedFile, DiffSide, PullRequestDetail, PullRequestReference,
+};
 use crate::review_action_store::ActionAuthorisationStamp;
+use openspec_core::diff::REQUESTED_FILE_BYTES_LIMIT;
 use openspec_core::{DiffContent, DiffFile};
 use serde::{Deserialize, Serialize};
 
@@ -1585,13 +1588,42 @@ fn file_identity(file: &DiffFile, path: &str) -> bool {
     file_path(file) == Some(path)
 }
 
-/// Whether `file`'s current content shows `side` line `line` to anchor on,
-/// as its hunks number them. A file without hunks — withheld, binary,
-/// oversized — shows nothing to anchor.
-fn line_shown(file: &DiffFile, side: DiffSide, line: u32) -> bool {
-    let DiffContent::Hunks { hunks } = &file.content else {
+/// Whether the current file can show `side` line `line`, using the same
+/// content as `PullRequestDetails::file`: eager hunks, budget-withheld hunks
+/// within the per-file ceiling, or a kept file read. The budgeted wire
+/// detail stays unchanged; unread patchless, binary and oversized files
+/// supply no anchor.
+fn line_shown(
+    detail: &PullRequestDetail,
+    files: &[CachedFile],
+    path: &str,
+    side: DiffSide,
+    line: u32,
+) -> bool {
+    let Some((index, file)) = detail
+        .files
+        .iter()
+        .enumerate()
+        .find(|(_, file)| file_identity(file, path))
+    else {
         return false;
     };
+    let hunks = match &file.content {
+        DiffContent::Hunks { hunks } => Some(hunks),
+        DiffContent::Withheld => files.get(index).and_then(|cached| {
+            match (&cached.withheld, &cached.fetch, &cached.fetched) {
+                (Some(hunks), _, _)
+                    if cached.patch.map_or(0, |patch| patch.len) <= REQUESTED_FILE_BYTES_LIMIT =>
+                {
+                    Some(hunks)
+                }
+                (None, Some(_), Some(DiffContent::Hunks { hunks })) => Some(hunks),
+                _ => None,
+            }
+        }),
+        _ => None,
+    };
+    let Some(hunks) = hunks else { return false };
     hunks.iter().any(|hunk| {
         hunk.lines
             .iter()
@@ -1725,15 +1757,11 @@ pub(crate) fn recovered_items(
 /// item's exact anchor — file identity, side and line for an inline comment,
 /// one replyable thread for a reply — and trivially so for an unplaced one,
 /// which asserts nothing until the reviewer explicitly places it again.
-fn anchored(item: &DraftItem, detail: &PullRequestDetail) -> bool {
+fn anchored(item: &DraftItem, detail: &PullRequestDetail, files: &[CachedFile]) -> bool {
     match item {
         DraftItem::PlacedInline {
             path, side, line, ..
-        } => detail
-            .files
-            .iter()
-            .find(|file| file_identity(file, path))
-            .is_some_and(|file| line_shown(file, *side, *line)),
+        } => line_shown(detail, files, path, *side, *line),
         DraftItem::PlacedReply { target, .. } => replyable_thread(detail, target),
         DraftItem::UnplacedInline { .. } | DraftItem::UnplacedReply { .. } => true,
     }
@@ -1753,6 +1781,7 @@ pub(crate) fn validate_draft_content(
     summary: &Option<String>,
     items: &[DraftItemInput],
     detail: &PullRequestDetail,
+    files: &[CachedFile],
 ) -> Result<(), DraftMutationRefusal> {
     if let Some(summary) = summary {
         if summary.trim().is_empty() {
@@ -1768,20 +1797,13 @@ pub(crate) fn validate_draft_content(
     for (index, input) in items.iter().enumerate() {
         let at = u32::try_from(index).unwrap_or(u32::MAX);
         let (body, current) = match input {
-            DraftItemInput::Carried { item } => (item_body(item), anchored(item, detail)),
+            DraftItemInput::Carried { item } => (item_body(item), anchored(item, detail, files)),
             DraftItemInput::NewInline {
                 body,
                 path,
                 side,
                 line,
-            } => (
-                body.as_str(),
-                detail
-                    .files
-                    .iter()
-                    .find(|file| file_identity(file, path))
-                    .is_some_and(|file| line_shown(file, *side, *line)),
-            ),
+            } => (body.as_str(), line_shown(detail, files, path, *side, *line)),
             DraftItemInput::NewReply { body, target } => {
                 (body.as_str(), replyable_thread(detail, target))
             }
@@ -2165,6 +2187,98 @@ mod draft_content_tests {
         }
     }
 
+    #[test]
+    fn cached_inline_anchors_obey_the_preview_ceiling_and_side() {
+        use crate::pull_request_detail::{FetchPaths, PatchDigest};
+        use openspec_core::diff::parse_hunks;
+
+        let path = "src/large.rs";
+        let hunks = parse_hunks(b"@@ -9 +10 @@\n-old\n+new\n");
+        let mut detail = detail();
+        detail.files = vec![DiffFile {
+            old_path: Some(path.to_string()),
+            new_path: Some(path.to_string()),
+            old_mode: None,
+            new_mode: None,
+            status: openspec_core::FileStatus::Modified,
+            additions: Some(1),
+            deletions: Some(1),
+            content: DiffContent::Withheld,
+        }];
+        // Every cached source must supply the exact line on the exact side.
+        let check = |cached: CachedFile, expected: bool| {
+            let files = [cached];
+            assert_eq!(
+                line_shown(&detail, &files, path, DiffSide::Old, 9),
+                expected
+            );
+            assert_eq!(
+                line_shown(&detail, &files, path, DiffSide::New, 10),
+                expected
+            );
+            assert!(!line_shown(&detail, &files, path, DiffSide::New, 9));
+            assert!(!line_shown(&detail, &files, path, DiffSide::Old, 10));
+            assert!(!line_shown(&detail, &files, "other.rs", DiffSide::New, 10));
+        };
+        for len in [
+            0,
+            REQUESTED_FILE_BYTES_LIMIT,
+            REQUESTED_FILE_BYTES_LIMIT + 1,
+        ] {
+            check(
+                CachedFile {
+                    withheld: Some(hunks.clone()),
+                    patch: Some(PatchDigest {
+                        len,
+                        sha256: [0; 32],
+                    }),
+                    ..Default::default()
+                },
+                len <= REQUESTED_FILE_BYTES_LIMIT,
+            );
+        }
+        check(
+            CachedFile {
+                withheld: Some(hunks.clone()),
+                ..Default::default()
+            },
+            true,
+        );
+        check(CachedFile::default(), false);
+        let fetch = Some(FetchPaths {
+            old: Some(path.to_string()),
+            new: Some(path.to_string()),
+        });
+        for content in [
+            DiffContent::Withheld,
+            DiffContent::TooLarge,
+            DiffContent::Binary,
+            DiffContent::Hunks { hunks: Vec::new() },
+            DiffContent::Hunks {
+                hunks: hunks.clone(),
+            },
+        ] {
+            let expected = matches!(&content, DiffContent::Hunks { hunks } if !hunks.is_empty());
+            check(
+                CachedFile {
+                    fetch: fetch.clone(),
+                    fetched: Some(content),
+                    ..Default::default()
+                },
+                expected,
+            );
+        }
+        check(
+            CachedFile {
+                fetch,
+                fetched: None,
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(!line_shown(&detail, &[], path, DiffSide::New, 10));
+    }
+
     /// A carried placed item is re-validated against the current detail
     /// exactly as a new one is: a reply to a thread the detail no longer
     /// reports refuses as a stale anchor at its index.
@@ -2173,14 +2287,15 @@ mod draft_content_tests {
         let detail = detail();
         let current = carried(placed_reply("PRRT_1", "Agreed."));
         assert_eq!(
-            validate_draft_content(&None, std::slice::from_ref(&current), &detail),
+            validate_draft_content(&None, std::slice::from_ref(&current), &detail, &[]),
             Ok(())
         );
         assert_eq!(
             validate_draft_content(
                 &None,
                 &[current, carried(placed_reply("PRRT_gone", "Agreed."))],
-                &detail
+                &detail,
+                &[],
             ),
             Err(DraftMutationRefusal::StaleAnchor { at: 1 })
         );
@@ -2200,24 +2315,34 @@ mod draft_content_tests {
             })
         };
         assert_eq!(
-            validate_draft_content(&None, &[unplaced("Still true.")], &detail),
+            validate_draft_content(&None, &[unplaced("Still true.")], &detail, &[]),
             Ok(())
         );
         assert_eq!(
-            validate_draft_content(&None, &[unplaced(" \n\t")], &detail),
+            validate_draft_content(&None, &[unplaced(" \n\t")], &detail, &[]),
             Err(DraftMutationRefusal::EmptyContent { at: Some(0) })
         );
         assert_eq!(
-            validate_draft_content(&None, &[unplaced(&"x".repeat(MAX_BODY_BYTES))], &detail),
+            validate_draft_content(
+                &None,
+                &[unplaced(&"x".repeat(MAX_BODY_BYTES))],
+                &detail,
+                &[]
+            ),
             Ok(()),
             "a body of exactly 30 KiB is within bounds"
         );
         assert_eq!(
-            validate_draft_content(&None, &[unplaced(&"x".repeat(MAX_BODY_BYTES + 1))], &detail),
+            validate_draft_content(
+                &None,
+                &[unplaced(&"x".repeat(MAX_BODY_BYTES + 1))],
+                &detail,
+                &[]
+            ),
             Err(DraftMutationRefusal::ContentTooLarge)
         );
         assert_eq!(
-            validate_draft_content(&None, &[carried(placed_reply("PRRT_1", ""))], &detail),
+            validate_draft_content(&None, &[carried(placed_reply("PRRT_1", ""))], &detail, &[]),
             Err(DraftMutationRefusal::EmptyContent { at: Some(0) })
         );
     }
