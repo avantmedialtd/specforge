@@ -106,6 +106,9 @@ export interface DiffViewProps {
     automaticReads?: PrContentLoading
     automaticReady?: boolean
     navigation?: DiffNavigation
+    /// Optional host-controlled single-file presentation. Keep the complete
+    /// model so switching files never resets loads, folds or mounted editors.
+    selection?: DiffFileSelection
     /// The model, in the order its sections and navigator rows are shown.
     files: DiffFile[]
     /// The names of the two sides, which the toolbar shows, escaped, while
@@ -220,6 +223,12 @@ export interface DiffNavigation {
     progressKnown: boolean
 }
 
+export interface DiffFileSelection {
+    path: string
+    onSelect: (path: string) => void
+    controls?: ReactNode
+}
+
 /// A withheld file's read on request, by its key.
 type FileLoad =
     | { status: "loading" }
@@ -276,6 +285,7 @@ const MARKERS: Record<LineKind, string> = { context: " ", added: "+", removed: "
 export function DiffView({
     visible = true,
     navigation,
+    selection,
     files,
     sideNames,
     loadFile,
@@ -296,6 +306,8 @@ export function DiffView({
     const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(NO_KEYS)
     const [revealPath, setRevealPath] = useState<string | null>(null)
     const [navigatorOpen, setNavigatorOpen] = useState(false)
+    const selectedPath = selection?.path
+    const selectFile = selection?.onSelect
     // Loaded content belongs to the `files` array it was read for, so a new
     // array from the host drops it with no effect and no stale frame.
     const [loadState, setLoadState] = useState(() => ({ files, byKey: NO_LOADS }))
@@ -313,6 +325,7 @@ export function DiffView({
     const fallbackId = useId()
 
     const rootRef = useRef<HTMLDivElement>(null)
+    const toolbarRef = useRef<HTMLDivElement>(null)
     const visibleRef = useRef(visible)
     visibleRef.current = visible
     const bodyRef = useRef<HTMLDivElement>(null)
@@ -344,8 +357,8 @@ export function DiffView({
     const asyncRestoreRef = useRef<(() => void) | null>(null)
     const mounted = useRef(true)
     const flights = useRef(new WeakMap<DiffFile[], Map<string, Promise<void>>>())
-    const autoLatest = useRef({ visible, collapsed, loads, images, automaticReads, automaticReady })
-    autoLatest.current = { visible, collapsed, loads, images, automaticReads, automaticReady }
+    const autoLatest = useRef({ visible, collapsed, loads, images, automaticReads, automaticReady, selectedPath })
+    autoLatest.current = { visible, collapsed, loads, images, automaticReads, automaticReady, selectedPath }
     useEffect(() => {
         mounted.current = true
         return () => { mounted.current = false }
@@ -466,8 +479,10 @@ export function DiffView({
             if (!mounted.current || filesRef.current !== requestedFor) { return }
             if (next.status === "loaded" && autoLatest.current.automaticReads) {
                 const section = sectionOf(sectionsRef.current, key)
-                if (section) { asyncRestoreRef.current ??= keepContentPlace(section, true) }
-                placeRef.current ??= recordPlace(sectionsRef.current)
+                if (section && !section.hidden) {
+                    asyncRestoreRef.current ??= keepContentPlace(section, true)
+                    placeRef.current ??= recordPlace(sectionsRef.current)
+                }
             }
             setLoadState((previous) => {
                 // A read that lands after the host passed new files is
@@ -505,8 +520,10 @@ export function DiffView({
             if (!mounted.current || filesRef.current !== requestedFor) { return }
             if (next.status === "read" && autoLatest.current.automaticReads) {
                 const section = sectionOf(sectionsRef.current, key)
-                if (section) { asyncRestoreRef.current ??= keepContentPlace(section, true) }
-                placeRef.current ??= recordPlace(sectionsRef.current)
+                if (section && !section.hidden) {
+                    asyncRestoreRef.current ??= keepContentPlace(section, true)
+                    placeRef.current ??= recordPlace(sectionsRef.current)
+                }
             }
             setImageState((previous) => {
                 if (filesRef.current !== requestedFor) { return previous }
@@ -558,7 +575,8 @@ export function DiffView({
                         for (const entry of entries) {
                             const near = (entry.target as HTMLElement).dataset.imagePlaceholder
                             if (near === undefined) { continue }
-                            if (entry.isIntersecting) { queue.near(near) }
+                            if (entry.isIntersecting && autoLatest.current.visible &&
+                                (autoLatest.current.selectedPath === undefined || autoLatest.current.selectedPath === near)) { queue.near(near) }
                             else { queue.left(near) }
                         }
                     },
@@ -597,12 +615,13 @@ export function DiffView({
             const work = automaticReads.watch(`${generation}:${kind}:${key}`, kind,
                 () => kind === "diff" ? load(file) : readImageFile(file),
                 () => filesRef.current === files && autoLatest.current.visible && autoLatest.current.automaticReady
+                    && (autoLatest.current.selectedPath === undefined || autoLatest.current.selectedPath === key)
                     && !autoLatest.current.collapsed.has(key) && contentIsVisible(node))
             const off = observeContent(node, work.near)
             cleanups.push(() => { off(); work.dispose() })
         }
         return () => { for (const off of cleanups) { off() } }
-    }, [automaticReads, files, loads, images, collapsed, visible, automaticReady, inEffect, load, readImageFile])
+    }, [automaticReads, files, loads, images, collapsed, visible, automaticReady, inEffect, selectedPath, load, readImageFile])
 
     /// Reads an image file as its host says: "Show image" reads it at once,
     /// and "Try again" near the view reads it next in the queue.
@@ -752,6 +771,7 @@ export function DiffView({
                 )
             },
             reveal(path: string) {
+                if (filesRef.current.some((file) => fileKey(file) === path)) { selectFile?.(path) }
                 setCollapsed((previous) => {
                     const next = new Set(previous)
                     next.delete(path)
@@ -761,21 +781,35 @@ export function DiffView({
                 setRevealPath(path)
             },
         }),
-        [actOn, slotsByKey, show],
+        [actOn, slotsByKey, show, selectFile],
     )
+
+    const lastSelectionRef = useRef(selectedPath)
+    useLayoutEffect(() => {
+        if (!visible || selectedPath === lastSelectionRef.current) { return }
+        lastSelectionRef.current = selectedPath
+        const target = toolbarRef.current
+        const port = scrollPortOf(sectionsRef.current)
+        if (target && port) {
+            // Keep the paired controls in view after a switch, not scrolled
+            // just above the sticky workspace header.
+            port.scrollTop += target.getBoundingClientRect().top - port.getBoundingClientRect().top -
+                (parseFloat(getComputedStyle(target).getPropertyValue("--diff-sticky-top")) || 0)
+        }
+    }, [visible, selectedPath])
 
     useLayoutEffect(() => {
         if (!visible || revealPath === null) { return }
         const section = sectionOf(sectionsRef.current, revealPath)
         const port = scrollPortOf(sectionsRef.current)
-        if (section && port) {
+        if (section && !section.hidden && port) {
             port.scrollTop += section.getBoundingClientRect().top - port.getBoundingClientRect().top -
                 (parseFloat(getComputedStyle(section).getPropertyValue("--diff-sticky-top")) || 0)
             section.tabIndex = -1
             section.focus({ preventScroll: true })
         }
         setRevealPath(null)
-    }, [visible, revealPath, collapsed, shown])
+    }, [visible, revealPath, collapsed, shown, selectedPath])
 
     // ---- What the files show now ----------------------------------------
 
@@ -893,11 +927,12 @@ export function DiffView({
                 <span className="diff-view-probe-ch" ref={chProbeRef} />
                 <span className="diff-view-probe-navigator" ref={navigatorProbeRef} />
             </div>
-            <div className="diff-toolbar">
+            <div className="diff-toolbar" ref={toolbarRef}>
                 {navigation && <button type="button" className="pull-request-view-action diff-navigator-disclosure"
                     aria-expanded={navigatorOpen} onClick={() => setNavigatorOpen((open) => !open)}>
                     Files and filters
                 </button>}
+                {selection?.controls}
                 <ChoiceGroup
                     options={LAYOUT_OPTIONS}
                     value={chosen}
@@ -930,6 +965,7 @@ export function DiffView({
                 <Navigator
                     visible={visible}
                     navigation={navigation}
+                    selection={selection}
                     files={files}
                     sectionsRef={sectionsRef}
                     restoredTopRef={restoredTopRef}
@@ -947,6 +983,7 @@ export function DiffView({
                                     key={key}
                                     file={file}
                                     index={index}
+                                    hidden={selectedPath !== undefined && selectedPath !== key}
                                     content={contentOf(file, loads)}
                                     load={loads.get(key)}
                                     collapsed={collapsed.has(key)}
@@ -1020,14 +1057,14 @@ function recordPlace(sections: HTMLElement | null): Place | null {
     if (!sections || !port) { return null }
     const portTop = port.getBoundingClientRect().top
     if (sections.getBoundingClientRect().top >= portTop) { return null }
-    const rows = sections.querySelectorAll<HTMLElement>(
+    const rows = Array.from(sections.querySelectorAll<HTMLElement>(
         ".diff-row, .diff-split-row, [data-hunk-folded]",
-    )
+    )).filter((row) => !row.closest<HTMLElement>(".diff-file")?.hidden)
     const row =
         rows[topmostVisible(rows.length, (i) => rows[i].getBoundingClientRect().bottom, portTop)]
     // Without a line below the port's top, every file left is collapsed or
     // shows a state row: keep the place by the topmost visible section.
-    const sectionList = sections.children
+    const sectionList = Array.from(sections.children).filter((section) => !(section as HTMLElement).hidden)
     const anchor =
         row ??
         sectionList[
@@ -1062,7 +1099,7 @@ function recordPlace(sections: HTMLElement | null): Place | null {
 function restorePlace(sections: HTMLElement | null, place: Place): number | null {
     const port = scrollPortOf(sections)
     const section = sectionOf(sections, place.file)
-    if (!port || !section) { return null }
+    if (!port || !section || section.hidden) { return null }
     const line = place.key
         ? section.querySelector(`[data-${place.key.side}-line="${place.key.line}"]`)
         : null
@@ -1112,7 +1149,7 @@ type Anchor =
 function anchorAt(target: Element): Anchor | null {
     const section = target.closest<HTMLElement>(".diff-file")
     const port = scrollPortOf(section)
-    if (!section || !port) { return null }
+    if (!section || section.hidden || !port) { return null }
     const file = section.dataset.fileKey ?? ""
     const below = (element: Element) =>
         element.getBoundingClientRect().top - port.getBoundingClientRect().top
@@ -1140,7 +1177,8 @@ function placeAnchor(place: Place | null): Anchor | null {
 /// The first row after hunk `hunk` of `section`: the next hunk's heading
 /// row, or after its last hunk, the next file's section.
 function afterHunk(section: HTMLElement, hunk: number): HTMLElement | null {
-    const next = section.nextElementSibling
+    let next = section.nextElementSibling
+    while (next instanceof HTMLElement && next.hidden) { next = next.nextElementSibling }
     return headingOf(section, hunk + 1) ?? (next instanceof HTMLElement ? next : null)
 }
 
@@ -1150,7 +1188,7 @@ function restoreAnchor(sections: HTMLElement | null, anchor: Anchor): number | n
     if (anchor.kind === "place") { return restorePlace(sections, anchor.place) }
     const port = scrollPortOf(sections)
     const section = sectionOf(sections, anchor.file)
-    if (!port || !section) { return null }
+    if (!port || !section || section.hidden) { return null }
     const target =
         anchor.kind === "heading"
             ? headingOf(section, anchor.hunk)
@@ -1438,6 +1476,7 @@ function escapeSelected(range: Range, escape: Element): boolean {
 interface NavigatorProps {
     visible: boolean
     navigation?: DiffNavigation
+    selection?: DiffFileSelection
     files: readonly DiffFile[]
     sectionsRef: RefObject<HTMLDivElement | null>
     /// The scroll position a switch's place-keeping last set, until the
@@ -1461,6 +1500,7 @@ interface NavigatorProps {
 const Navigator = memo(function Navigator({
     visible,
     navigation,
+    selection,
     files,
     sectionsRef,
     restoredTopRef,
@@ -1471,7 +1511,9 @@ const Navigator = memo(function Navigator({
 }: NavigatorProps) {
     const fullTree = useMemo(() => navigatorTree(files), [files])
     const [closed, setClosed] = useState<ReadonlySet<string>>(NO_KEYS)
-    const [marked, setMarked] = useState<string | null>(null)
+    const [scrolledMark, setMarked] = useState<string | null>(null)
+    const marked = selection?.path ?? scrolledMark
+    const selectFile = selection?.onSelect
     const tree = useMemo(() => {
         if (!navigation) { return fullTree }
         const prune = (nodes: readonly NavigatorNode[]): NavigatorNode[] => nodes.flatMap<NavigatorNode>((node) => {
@@ -1492,7 +1534,7 @@ const Navigator = memo(function Navigator({
     const lockRef = useRef<{ top: number } | null>(null)
 
     const recompute = useCallback(() => {
-        if (!visible) { return }
+        if (!visible || selectFile) { return }
         const sections = sectionsRef.current
         const port = scrollPortOf(sections)
         if (!sections || !port) { return }
@@ -1517,7 +1559,7 @@ const Navigator = memo(function Navigator({
         )
         const section = list[index]
         setMarked(section instanceof HTMLElement ? (section.dataset.fileKey ?? null) : null)
-    }, [sectionsRef, restoredTopRef, visible])
+    }, [sectionsRef, restoredTopRef, visible, selectFile])
 
     useEffect(() => {
         const port = scrollPortOf(sectionsRef.current)
@@ -1532,6 +1574,13 @@ const Navigator = memo(function Navigator({
 
     const activate = useCallback(
         (index: number, key: string) => {
+            // A different selection scrolls after its section becomes visible.
+            // The current file is already visible and must scroll even though
+            // its host-controlled selection will not change.
+            if (selectFile && key !== marked) {
+                selectFile(key)
+                return
+            }
             const section = sectionsRef.current?.children[index]
             const port = scrollPortOf(sectionsRef.current)
             if (!section || !port) { return }
@@ -1540,7 +1589,7 @@ const Navigator = memo(function Navigator({
             lockRef.current = { top: port.scrollTop }
             setMarked(key)
         },
-        [sectionsRef],
+        [sectionsRef, selectFile, marked],
     )
 
     const toggleDirectory = useCallback((path: string) => {
@@ -1803,6 +1852,7 @@ function NavigatorRows({ nodes, level, closed, marked, onToggle, onActivate, bad
 interface FileSectionProps {
     file: DiffFile
     index: number
+    hidden: boolean
     /// What the file shows now: its loaded content in place of a withheld one.
     content: DiffContent
     load: FileLoad | undefined
@@ -1865,6 +1915,7 @@ interface HunkFolds {
 const FileSection = memo(function FileSection({
     file,
     index,
+    hidden,
     content,
     load,
     collapsed,
@@ -1921,7 +1972,7 @@ const FileSection = memo(function FileSection({
         toggleRef.current?.focus()
     }, [load?.status])
     return (
-        <section className="diff-file" data-file-index={index} data-file-key={key} style={style}
+        <section className="diff-file" data-file-index={index} data-file-key={key} style={style} hidden={hidden}
             ref={horizontal.sectionRef} onScrollCapture={horizontal.onScrollCapture}>
             <div className="diff-file-header" data-copy-line="">
                 <button

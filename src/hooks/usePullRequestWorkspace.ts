@@ -45,6 +45,7 @@ export function usePullRequestWorkspace(
             const top = port.getBoundingClientRect().top + inset
             let current: HTMLElement | undefined
             for (const section of sections ?? []) {
+                if (section.hidden) { continue }
                 if (!current || section.getBoundingClientRect().top <= top) { current = section }
             }
             presentation.current.place = current?.dataset.fileKey ? {
@@ -82,7 +83,7 @@ export function usePullRequestWorkspace(
         // Diff layout is measured in a child layout effect before it draws rows.
         const frame = requestAnimationFrame(() => {
             const sections = root.current?.querySelectorAll<HTMLElement>("[data-file-key]")
-            const section = Array.from(sections ?? []).find((item) => item.dataset.fileKey === place.path)
+            const section = Array.from(sections ?? []).find((item) => !item.hidden && item.dataset.fileKey === place.path)
             if (section) {
                 port.scrollTop += section.getBoundingClientRect().top -
                     port.getBoundingClientRect().top +
@@ -114,5 +115,5 @@ export function usePullRequestWorkspace(
         }
     }, [capture, root, hasDetail])
 
-    return { tab, choose, filesMounted }
+    return { tab, choose, filesMounted, initialPath: initial.place?.path ?? null }
 }

@@ -190,10 +190,16 @@ export function orderedReviewThreads(threads: readonly ReviewThread[], files: re
     return files.flatMap((file) => split.byFile.get(fileKey(file)) ?? []).concat(split.unlisted)
 }
 
-export function nextCandidate(order: readonly string[], candidates: ReadonlySet<string>, current: string | null): string | null {
-    const start = current === null ? -1 : order.indexOf(current)
+export function nextCandidate(
+    order: readonly string[],
+    candidates: ReadonlySet<string>,
+    current: string | null,
+    direction: 1 | -1 = 1,
+): string | null {
+    const index = current === null ? -1 : order.indexOf(current)
+    const start = index < 0 ? (direction === 1 ? -1 : 0) : index
     for (let step = 1; step <= order.length; step++) {
-        const candidate = order[(start + step) % order.length]
+        const candidate = order[(start + direction * step + order.length) % order.length]
         if (candidate !== current && candidates.has(candidate)) { return candidate }
     }
     return null

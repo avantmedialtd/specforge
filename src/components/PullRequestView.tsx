@@ -1,6 +1,7 @@
 import {
     useCallback,
     useEffect,
+    useId,
     useLayoutEffect,
     useMemo,
     useRef,
@@ -647,6 +648,7 @@ export function PullRequestView({
                         visible={workspace.tab === "files"}
                         jump={jump}
                         onJumpFinished={jumpFinished}
+                        initialPath={workspace.initialPath}
                     />}
                     </div>
                     </PullRequestLoadingScope>
@@ -1140,6 +1142,7 @@ export function PullRequestFiles({
     visible = true,
     jump = null,
     onJumpFinished,
+    initialPath = null,
 }: {
     detail: PullRequestDetail
     reference: PullRequestReference
@@ -1149,6 +1152,7 @@ export function PullRequestFiles({
     visible?: boolean
     jump?: ReviewJump | null
     onJumpFinished?: (found: boolean) => void
+    initialPath?: string | null
 }) {
     const { headCommit: head, baseCommit: base } = detail
     const loading = usePullRequestLoading()
@@ -1295,7 +1299,18 @@ export function PullRequestFiles({
     const filesRoot = useRef<HTMLElement>(null)
     const [fileQuery, setFileQuery] = useState("")
     const [fileFilter, setFileFilter] = useState<FileFilter>("all")
-    const currentProgress = progress?.headCommit === head && progress.baseCommit === base ? progress : null
+    const [selected, setSelected] = useState(initialPath)
+    const selectedIndex = Math.max(0, detail.files.findIndex((file) => fileKey(file) === selected))
+    const selectedPath = detail.files[selectedIndex] ? fileKey(detail.files[selectedIndex]) : ""
+    const chooseFile = useCallback((path: string) => setSelected(path), [])
+    // Drop a removed selection rather than reviving it if a later refresh
+    // reintroduces the same path. Progress/filter changes never select a file.
+    // Reconcile before committing: an effect here would race a mount-time
+    // discussion jump and overwrite the explicit selection with the fallback.
+    if (selected !== selectedPath) { setSelected(selectedPath) }
+    const fileNavigationHintId = useId()
+    const currentProgress = progress?.headCommit === head && progress.baseCommit === base &&
+        progress.total === detail.files.length ? progress : null
     const navigation = useMemo(() => ({
         ...reviewFileList(detail.files, currentProgress, detail.threads, fileQuery,
             !currentProgress && progressFilter(fileFilter) ? "all" : fileFilter),
@@ -1316,6 +1331,33 @@ export function PullRequestFiles({
                 onClick={() => { setFileQuery(""); setFileFilter("all") }}>Clear filters</button> : null,
         },
     }), [detail.files, detail.threads, currentProgress, fileQuery, fileFilter])
+    const fileOrder = useMemo(() => detail.files.map(fileKey), [detail.files])
+    const previousFile = nextCandidate(fileOrder, navigation.remaining, selectedPath, -1)
+    const nextFile = nextCandidate(fileOrder, navigation.remaining, selectedPath)
+    const navigationHint = !currentProgress ? "Review progress unavailable." :
+        nextFile === null ? "No other matching unreviewed files." : null
+    const selection = {
+        path: selectedPath,
+        onSelect: chooseFile,
+        controls: <nav className="pr-file-navigation" aria-label="Review file navigation" data-copy="skip">
+            <button type="button" className="pull-request-view-action"
+                aria-label="Previous unreviewed" disabled={previousFile === null}
+                title={navigationHint ?? "Previous unreviewed file (skips viewed and skipped files)"}
+                aria-describedby={navigationHint ? fileNavigationHintId : undefined}
+                onClick={() => { if (previousFile !== null) { chooseFile(previousFile) } }}>
+                ← Previous
+            </button>
+            <span className="pr-file-position" role="status">File {selectedIndex + 1} of {detail.files.length}</span>
+            <button type="button" className="pull-request-view-action"
+                aria-label="Next unreviewed" disabled={nextFile === null}
+                title={navigationHint ?? "Next unreviewed file (skips viewed and skipped files)"}
+                aria-describedby={navigationHint ? fileNavigationHintId : undefined}
+                onClick={() => { if (nextFile !== null) { chooseFile(nextFile) } }}>
+                Next →
+            </button>
+            {navigationHint && <span id={fileNavigationHintId} className="sr-only">{navigationHint}</span>}
+        </nav>,
+    }
     useLayoutEffect(() => {
         if (!visible || !jump) { return }
         diffRef.current?.reveal(fileKeysByPath(detail.files).get(jump.path) ?? jump.path)
@@ -1436,6 +1478,7 @@ export function PullRequestFiles({
                 <DiffView
                     visible={visible}
                     navigation={navigation}
+                    selection={selection}
                     key={referenceKey(reference)}
                     files={detail.files}
                     sideNames={sideNames}

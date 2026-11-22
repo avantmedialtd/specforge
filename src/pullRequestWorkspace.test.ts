@@ -220,6 +220,31 @@ describe("review-aware file candidates", () => {
         expect(nextCandidate(order, new Set(["c"]), "c")).toBeNull()
         expect(nextCandidate([], new Set(), null)).toBeNull()
     })
+    test("previous follows reverse order, wraps once and excludes the current item", () => {
+        const order = ["a", "b", "c", "d"]
+        const candidates = new Set(["a", "c", "d"])
+        expect(nextCandidate(order, candidates, "d", -1)).toBe("c")
+        expect(nextCandidate(order, candidates, "c", -1)).toBe("a")
+        expect(nextCandidate(order, candidates, "a", -1)).toBe("d")
+        expect(nextCandidate(order, candidates, null, -1)).toBe("d")
+        expect(nextCandidate(order, candidates, "removed", -1)).toBe("d")
+        expect(nextCandidate(order, new Set(["c"]), "c", -1)).toBeNull()
+        expect(nextCandidate([], new Set(), null, -1)).toBeNull()
+    })
+    test("both directions use matching unreviewed files, never viewed or skipped files", () => {
+        const order = files.map((file) => file.newPath!)
+        const remaining = reviewFileList(files, progress, [], "", "all").remaining
+        expect(nextCandidate(order, remaining, "src/b.ts")).toBe("docs/c.md")
+        expect(nextCandidate(order, remaining, "docs/c.md")).toBe("src/b.ts")
+        expect(nextCandidate(order, remaining, "docs/c.md", -1)).toBe("src/b.ts")
+        expect(nextCandidate(order, remaining, "src/b.ts", -1)).toBe("docs/c.md")
+        const filtered = reviewFileList(files, progress, [], "src/", "all").remaining
+        expect(nextCandidate(order, filtered, "src/b.ts")).toBeNull()
+        expect(nextCandidate(order, filtered, "src/b.ts", -1)).toBeNull()
+        const unknown = reviewFileList(files, null, [], "", "all").remaining
+        expect(nextCandidate(order, unknown, null)).toBeNull()
+        expect(nextCandidate(order, unknown, null, -1)).toBeNull()
+    })
 })
 
 describe("status and panel triage", () => {

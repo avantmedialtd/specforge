@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { act, type ReactNode } from "react"
+import { act, createRef, useState, type ReactNode } from "react"
 import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../testing/fakeDom"
 import { fileKey, type NavigatorReviewBadge } from "../diffFiles"
 import { DIFF_LAYOUT_STORAGE_KEY } from "../diffLayout"
 import { createSlotCache, lineSlotLookup } from "../slotCache"
 import type { DiffFile, Hunk, Line, ImageVersions } from "../types"
 import { PrContentLoading } from "../prContentLoading"
-import { DiffView, type DiffNavigation, type FileSlots } from "./DiffView"
+import { DiffView, type DiffNavigation, type DiffViewHandle, type FileSlots } from "./DiffView"
 
 // `diff-view`: *Provider-Neutral Diff Line Slots* and *Diff View Hosts*. The
 // view is mounted for real, through `react-dom/client` on the fake DOM, so the
@@ -250,6 +250,8 @@ function slotOnly(content: string, side?: "old" | "new", line?: number): Lookup 
 interface MountOptions {
     visible?: boolean
     navigation?: DiffNavigation
+    selectedPath?: string
+    handle?: ReturnType<typeof createRef<DiffViewHandle>>
     loadFile?: (file: DiffFile) => Promise<DiffFile>
     readImage?: () => Promise<ImageVersions>
     imageReads?: "nearView" | "onRequest"
@@ -277,24 +279,30 @@ async function mount(
     const root = createRoot(container as unknown as Element)
     // Stable, as both hosts keep theirs: `FileSection` compares it by identity.
     const sideNames = { old: "base", new: "head" }
-    const render = (
-        nextFiles: DiffFile[],
-        nextSlots: ((file: DiffFile) => FileSlots | undefined) | undefined,
-    ) =>
-        root.render(
+    function View({ model, slots }: {
+        model: DiffFile[]
+        slots: ((file: DiffFile) => FileSlots | undefined) | undefined
+    }) {
+        const [path, onSelect] = useState(options.selectedPath)
+        return (
             <DiffView
                 visible={options.visible}
                 navigation={options.navigation}
-                files={nextFiles}
+                selection={path === undefined ? undefined : { path, onSelect }}
+                ref={options.handle}
+                files={model}
                 sideNames={sideNames}
                 loadFile={options.loadFile ?? ((candidate) => Promise.resolve(candidate))}
-                fileSlots={nextSlots}
+                fileSlots={slots}
                 readImage={options.readImage}
                 imageReads={options.imageReads}
                 automaticReads={options.automaticReads}
                 zoomImage={options.zoomImage}
-            />,
+            />
         )
+    }
+    const render = (model: DiffFile[], slots: ((file: DiffFile) => FileSlots | undefined) | undefined) =>
+        root.render(<View model={model} slots={slots} />)
     await act(async () => render(files, slots))
     return {
         container,
@@ -327,6 +335,29 @@ describe("PR automatic reads through the shared renderer", () => {
             }
         }
     }
+    test("single-file presentation starts automatic loads only for the selected file", async () => {
+        const restore = measuring()
+        const controller = new PrContentLoading()
+        controller.policy({ autoShowImages: true, autoLoadLargeDiffs: true }, true)
+        const files = ["a.ts", "b.ts"].map(path => fileAt(path, { content: { kind: "withheld" } }))
+        const reads: string[] = []
+        const view = await mount(files, undefined, {
+            selectedPath: "a.ts", navigation: navigationFor(files), automaticReads: controller,
+            loadFile: async candidate => {
+                reads.push(fileKey(candidate))
+                return { ...candidate, content: { kind: "hunks", hunks: [hunk()] } }
+            },
+        })
+        try {
+            await act(async () => NearObserver.enter())
+            expect(reads).toEqual(["a.ts"])
+            await press(byClass(view.container, "diff-nav-row--file")[1])
+            await act(async () => NearObserver.enter())
+            expect(reads).toEqual(["a.ts", "b.ts"])
+            expect(sectionOf(view.container, "a.ts").hidden).toBe(true)
+            expect(sectionOf(view.container, "b.ts").hidden).toBe(false)
+        } finally { await view.unmount(); controller.dispose(); restore() }
+    })
     for (const images of [false, true]) {
         for (const diffs of [false, true]) {
             test(`independent preferences: images=${images}, diffs=${diffs}`, async () => {
@@ -504,6 +535,128 @@ function navigationFor(files: readonly DiffFile[], overrides: Partial<DiffNaviga
         ...overrides,
     }
 }
+
+describe("host-selected file visibility", () => {
+    for (const activation of ["click", "Enter", " "] as const) {
+        test(`reactivating the selected file scrolls to its header (${activation === " " ? "Space" : activation})`, async () => {
+            const files = [fileAt("a.ts"), fileAt("b.ts")]
+            const slots: FileSlots = { preamble: <textarea defaultValue="unsaved comment" /> }
+            const view = await mount(files, () => slots, {
+                selectedPath: "b.ts", navigation: navigationFor(files),
+            })
+            try {
+                const section = sectionOf(view.container, "b.ts")
+                const row = byClass(view.container, "diff-nav-row--file")[1]
+                const tree = byClass(view.container, "pr-file-tree")[0]
+                const editor = section.findAll("textarea")[0]
+                editor.value = "keep this draft"
+                const port = Object.assign(view.container, { scrollTop: 0 })
+                port.style.overflowY = "auto"
+                port.getBoundingClientRect = () => ({ x: 0, y: 20, top: 20, left: 0, right: 800, bottom: 620, width: 800, height: 600 })
+                section.style["--diff-sticky-top"] = "60px"
+                section.getBoundingClientRect = () => ({
+                    x: 0, y: 320 - port.scrollTop, top: 320 - port.scrollTop, left: 0,
+                    right: 800, bottom: 2320 - port.scrollTop, width: 800, height: 2000,
+                })
+                Object.assign(row, {
+                    closest: () => row,
+                    click: () => (reactProps(row).onClick as () => void)(),
+                })
+                for (const top of [900, 1200]) {
+                    port.scrollTop = top
+                    if (activation === "click") { await press(row) }
+                    else {
+                        await act(async () => {
+                            ;(reactProps(tree).onKeyDown as (event: unknown) => void)({
+                                target: row, key: activation, preventDefault() {},
+                            })
+                        })
+                    }
+                    expect(port.scrollTop).toBe(240)
+                    expect(section.hidden).toBe(false)
+                    expect(sectionOf(view.container, "a.ts").hidden).toBe(true)
+                    expect(row.getAttribute("aria-current")).toBe("true")
+                    expect(section.findAll("textarea")[0]).toBe(editor)
+                    expect(editor.value).toBe("keep this draft")
+                }
+            } finally { await view.unmount() }
+        })
+    }
+    test("one file is visible, tree activation selects it and editors and folds survive returning", async () => {
+        const files = [fileAt("a.ts"), fileAt("b.ts")]
+        const slots: FileSlots = { preamble: <textarea defaultValue="unsaved comment" /> }
+        const view = await mount(files, candidate => fileKey(candidate) === "a.ts" ? slots : undefined, {
+            selectedPath: "a.ts", navigation: navigationFor(files),
+        })
+        try {
+            const a = sectionOf(view.container, "a.ts")
+            const b = sectionOf(view.container, "b.ts")
+            const editor = view.container.findAll("textarea")[0]
+            editor.value = "still typing"
+            expect(a.hidden).toBe(false)
+            expect(b.hidden).toBe(true)
+            await press(byClass(a, "diff-file-toggle")[0])
+            await press(byClass(view.container, "diff-nav-row--file")[1])
+            expect(a.hidden).toBe(true)
+            expect(b.hidden).toBe(false)
+            expect(byClass(view.container, "diff-nav-row--file")[1].getAttribute("aria-current")).toBe("true")
+            await press(byClass(view.container, "diff-nav-row--file")[0])
+            expect(sectionOf(view.container, "a.ts")).toBe(a)
+            expect(byClass(a, "diff-file-toggle")[0].getAttribute("aria-expanded")).toBe("false")
+            await press(byClass(a, "diff-file-toggle")[0])
+            expect(a.hidden).toBe(false)
+            // A collapse intentionally unmounts its body; selection alone does not.
+            const retained = view.container.findAll("textarea")[0]
+            retained.value = "retained while hidden"
+            await press(byClass(view.container, "diff-nav-row--file")[1])
+            await press(byClass(view.container, "diff-nav-row--file")[0])
+            expect(view.container.findAll("textarea")[0]).toBe(retained)
+            expect(retained.value).toBe("retained while hidden")
+        } finally { await view.unmount() }
+    })
+    test("a late load is retained without selecting its now-hidden file", async () => {
+        const files = [fileAt("a.ts", { content: { kind: "withheld" } }), fileAt("b.ts")]
+        let answer!: (file: DiffFile) => void
+        let reads = 0
+        const view = await mount(files, undefined, {
+            selectedPath: "a.ts", navigation: navigationFor(files),
+            loadFile: () => { reads++; return new Promise(resolve => { answer = resolve }) },
+        })
+        try {
+            await press(byClass(sectionOf(view.container, "a.ts"), "diff-load")[0])
+            await press(byClass(view.container, "diff-nav-row--file")[1])
+            const b = sectionOf(view.container, "b.ts")
+            await act(async () => answer({ ...files[0], content: { kind: "hunks", hunks: [hunk()] } }))
+            expect(b.hidden).toBe(false)
+            expect(sectionOf(view.container, "a.ts").hidden).toBe(true)
+            await press(byClass(view.container, "diff-nav-row--file")[0])
+            expect(sectionOf(view.container, "a.ts").textContent).toContain("const answer = 42")
+            expect(reads).toBe(1)
+        } finally { await view.unmount() }
+    })
+    test("an explicit reveal selects a file outside the navigator filter", async () => {
+        const files = [fileAt("a.ts"), fileAt("b.ts")]
+        const handle = createRef<DiffViewHandle>()
+        const view = await mount(files, undefined, {
+            selectedPath: "a.ts", handle,
+            navigation: navigationFor(files, { candidates: new Set(["a.ts"]) }),
+        })
+        try {
+            await act(async () => handle.current!.reveal("b.ts"))
+            expect(sectionOf(view.container, "a.ts").hidden).toBe(true)
+            expect(sectionOf(view.container, "b.ts").hidden).toBe(false)
+            expect(byClass(view.container, "pr-file-controls")[0].textContent)
+                .toContain("Current file is outside this filter: b.ts")
+        } finally { await view.unmount() }
+    })
+    test("without selection every file section remains visible", async () => {
+        const files = [fileAt("a.ts"), fileAt("b.ts")]
+        const view = await mount(files, undefined)
+        try {
+            expect(byClass(view.container, "diff-file").every(section => !section.hidden)).toBe(true)
+        } finally { await view.unmount() }
+    })
+})
 
 describe("compact PR navigator rows", () => {
     test("all six review icons are shape-distinct, passive and fully described", async () => {

@@ -5751,6 +5751,26 @@ body[data-surface="image"] #root {
     padding: var(--space-3) var(--space-6) 0;
 }
 
+.pr-file-navigation {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
+.pr-file-position {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.pr-file-navigation button:disabled {
+    color: var(--text-muted);
+    cursor: default;
+}
+
 .pr-thread-index {
     list-style: none;
     margin: var(--space-3) 0;
@@ -6002,6 +6022,7 @@ body[data-surface="image"] #root {
     .pr-workspace-tabs button,
     .pr-workspace-status button,
     .pr-files-actions button,
+    .pr-file-navigation button,
     .pr-file-controls button,
     .pr-file-controls input,
     .pr-file-controls select,

@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { act } from "react"
+import { act, useRef } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { FakeElement, FakeNode, installFakeDom, type FakeDocument } from "../testing/fakeDom"
 import { minimisedText } from "../pullRequestView"
 import { installFakeTransport, settle } from "../testing/fakeTransport"
 import { prProgressReconciler } from "../prContentLoading"
+import { readWorkspace, workspaceKey, writeWorkspace, type ReviewJump } from "../pullRequestWorkspace"
+import { usePullRequestWorkspace } from "../hooks/usePullRequestWorkspace"
 import { MAX_BODY_BYTES } from "../reviewActions"
 import {
     DraftItemsEditorContext,
@@ -575,6 +577,7 @@ async function mountFiles(
     progress: ReviewProgress | null = null,
     editor: ReviewDraftEditor | null = null,
     onFileRefused: () => void = () => {},
+    options: { initialPath?: string; jump?: ReviewJump; onJumpFinished?: (found: boolean) => void } = {},
 ) {
     const container = dom.document.createElement("div")
     const root = createRoot(container as unknown as Element)
@@ -587,6 +590,9 @@ async function mountFiles(
                 progress={nextProgress}
                 reloadProgress={() => Promise.resolve(nextProgress)}
                 onFileRefused={onFileRefused}
+                initialPath={options.initialPath}
+                jump={options.jump}
+                onJumpFinished={options.onJumpFinished}
             />
         )
         return currentEditor === null ? (
@@ -734,6 +740,142 @@ describe("review threads render where their line is", () => {
         g.localStorage = { getItem: () => null, setItem: () => {} }
     })
 
+    test("Previous and Next show one file and skip viewed and skipped files in both directions", async () => {
+        const files = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"].map(path => changedFile(path))
+        const detail = detailWith([], files)
+        const states = ["unviewed", "viewed", "skipped", "partlyViewed", "changedSinceViewed"] as const
+        const progress = progressFor(files.map((file, index) => ({
+            ...viewedHunk(file.newPath!), state: states[index], hunks: [states[index] === "viewed"],
+        })))
+        const calls: string[] = []
+        const transport = installFakeTransport((command) => { calls.push(command); throw Error(command) })
+        const mounted = await mountFiles(detail, progress)
+        const current = () => byClass(mounted.container, "diff-file")
+            .filter(section => !section.hidden).map(section => section.getAttribute("data-file-key"))
+        const navigation = () => byClass(mounted.container, "pr-file-navigation")[0]
+        const move = async (label: string) => press(navigation().findAll("button")
+            .find(button => button.getAttribute("aria-label") === label)!)
+        try {
+            expect(current()).toEqual(["a.ts"])
+            expect(navigation().textContent).toContain("File 1 of 5")
+            expect(navigation().parentElement).toBe(byClass(mounted.container, "diff-toolbar")[0])
+            await move("Next unreviewed")
+            expect(current()).toEqual(["d.ts"])
+            expect(navigation().textContent).toContain("File 4 of 5")
+            await move("Next unreviewed")
+            expect(current()).toEqual(["e.ts"])
+            await move("Next unreviewed")
+            expect(current()).toEqual(["a.ts"])
+            await move("Previous unreviewed")
+            expect(current()).toEqual(["e.ts"])
+            await move("Previous unreviewed")
+            expect(current()).toEqual(["d.ts"])
+            await move("Previous unreviewed")
+            expect(current()).toEqual(["a.ts"])
+            // Direct selection remains available for files the buttons skip.
+            await press(byClass(mounted.container, "diff-nav-row--file")[1])
+            expect(current()).toEqual(["b.ts"])
+            await press(byClass(mounted.container, "diff-nav-row--file")[2])
+            expect(current()).toEqual(["c.ts"])
+            expect(calls).toEqual([])
+        } finally { await mounted.unmount(); transport.uninstall() }
+    })
+
+    test("filtering and completed progress keep the current file and explain disabled navigation", async () => {
+        const detail = detailWith([])
+        const progress = progressFor(detail.files.map(file => ({
+            ...viewedHunk(file.newPath!), state: "unviewed", hunks: [false],
+        })))
+        const mounted = await mountFiles(detail, progress)
+        const current = () => byClass(mounted.container, "diff-file").filter(section => !section.hidden)
+        try {
+            const a = current()[0]
+            const controls = byClass(mounted.container, "pr-file-controls")[0]
+            await act(async () => {
+                ;(reactProps(controls.findAll("select")[0]).onChange as (event: unknown) => void)({
+                    currentTarget: { value: "unreviewed" },
+                })
+            })
+            await mounted.rerender(detail, {
+                ...progress, viewed: 2, files: progress.files.map(file => ({ ...file, state: "viewed", hunks: [true] })),
+            })
+            expect(current()).toEqual([a])
+            expect(controls.textContent).toContain("Current file is outside this filter: src/a.ts")
+            for (const button of byClass(mounted.container, "pr-file-navigation")[0].findAll("button")) {
+                expect(reactProps(button).disabled).toBe(true)
+                expect(button.getAttribute("title")).toBe("No other matching unreviewed files.")
+                const description = allElements(mounted.container)
+                    .find(element => element.getAttribute("id") === button.getAttribute("aria-describedby"))
+                expect(description?.textContent).toBe("No other matching unreviewed files.")
+            }
+            await mounted.rerender(detail, null)
+            expect(current()).toEqual([a])
+            expect(byClass(mounted.container, "pr-file-navigation")[0].textContent)
+                .toContain("Review progress unavailable.")
+        } finally { await mounted.unmount() }
+    })
+
+    test("saved selection restores the file and a removed path falls back without reviving later", async () => {
+        const detail = detailWith([])
+        const mounted = await mountFiles(detail, null, null, () => {}, { initialPath: "src/b.ts" })
+        const current = () => byClass(mounted.container, "diff-file")
+            .filter(section => !section.hidden).map(section => section.getAttribute("data-file-key"))
+        try {
+            expect(current()).toEqual(["src/b.ts"])
+            await mounted.rerender({ ...detail, files: [detail.files[0]], headCommit: "new-head" }, null)
+            expect(current()).toEqual(["src/a.ts"])
+            await mounted.rerender(detail, null)
+            expect(current()).toEqual(["src/a.ts"])
+        } finally { await mounted.unmount() }
+    })
+
+    test("workspace capture persists only the visible file, not a later hidden section", async () => {
+        const container = dom.document.createElement("div")
+        const root = createRoot(container as unknown as Element)
+        const key = workspaceKey(REFERENCE, "main")
+        writeWorkspace(key, { tab: "overview", place: null })
+        function Workspace() {
+            const ref = useRef<HTMLDivElement>(null)
+            usePullRequestWorkspace(REFERENCE, "main", ref, detailWith([]))
+            return <div ref={ref} style={{ overflowY: "auto" }}>
+                <section data-file-key="src/a.ts" hidden />
+                <section data-file-key="src/b.ts" />
+                <section data-file-key="src/c.ts" hidden />
+            </div>
+        }
+        // Enter Files before mount without requesting any real provider data.
+        writeWorkspace(key, { tab: "files", place: null })
+        try {
+            await act(async () => root.render(<Workspace />))
+            ;(g.window as { dispatch: (type: string, event: unknown) => void }).dispatch("pagehide", {})
+            expect(readWorkspace(key).place?.path).toBe("src/b.ts")
+        } finally { await act(async () => root.unmount()) }
+    })
+
+    test("a thread jump selects and reveals its hidden file before reporting success", async () => {
+        const savedFrame = g.requestAnimationFrame
+        const savedCancel = g.cancelAnimationFrame
+        const frames: Array<(time: number) => void> = []
+        g.requestAnimationFrame = (callback: (time: number) => void) => frames.push(callback)
+        g.cancelAnimationFrame = () => {}
+        const outcomes: boolean[] = []
+        const detail = detailWith([thread("target", { path: "src/b.ts" })])
+        const mounted = await mountFiles(detail, null, null, () => {}, {
+            jump: { kind: "thread", id: "target", path: "src/b.ts" },
+            onJumpFinished: found => outcomes.push(found),
+        })
+        try {
+            await act(async () => { for (const frame of frames.splice(0)) { frame(0) } })
+            expect(sectionOf(mounted.container, "src/a.ts").hidden).toBe(true)
+            expect(sectionOf(mounted.container, "src/b.ts").hidden).toBe(false)
+            expect(outcomes).toEqual([true])
+        } finally {
+            await mounted.unmount()
+            if (savedFrame === undefined) { delete g.requestAnimationFrame } else { g.requestAnimationFrame = savedFrame }
+            if (savedCancel === undefined) { delete g.cancelAnimationFrame } else { g.cancelAnimationFrame = savedCancel }
+        }
+    })
+
     test("stale batches refresh once per current model, and old replies cannot refresh its replacement", async () => {
         const pending: ((value: unknown) => void)[] = []
         const requests: Record<string, unknown>[] = []
@@ -836,6 +978,10 @@ describe("review threads render where their line is", () => {
                 )!
                 expect(reactProps(next).disabled).toBe(true)
                 expect(next.getAttribute("title")).toBe("Review progress unavailable.")
+                for (const button of byClass(mounted.container, "pr-file-navigation")[0].findAll("button")) {
+                    expect(reactProps(button).disabled).toBe(true)
+                    expect(button.getAttribute("title")).toBe("Review progress unavailable.")
+                }
                 expect(byClass(mounted.container, "pr-file-review")
                     .every((marker) => marker.getAttribute("data-review-state") === "unknown")).toBe(true)
             }
