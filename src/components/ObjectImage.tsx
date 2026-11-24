@@ -3,9 +3,9 @@ import type { DecodedImage } from "../diffImage"
 
 /// An image drawn from bytes in memory (`diff-view`: *Image Comparison*): an
 /// object URL made for this mount and revoked when it unmounts, never a URL
-/// that names a host. Its box is reserved from the dimensions the service
-/// read before it decodes. The inline comparison and the maximized one both
-/// draw through it.
+/// that names a host. Its box is reserved from checked, orientation-aware
+/// dimensions before it decodes. The inline comparison and the maximized
+/// one both draw through it.
 export function ObjectImage({
     image,
     alt,

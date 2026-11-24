@@ -13,15 +13,18 @@ import { ChoiceGroup, type ChoiceOption } from "./ChoiceGroup"
 import type { Extents, Point, ZoomState } from "./figureZoom"
 import { actualSizeState, panBy, pinchFactor, zoomAt } from "./figureZoom"
 import { Close, FitToView, ZoomIn, ZoomOut } from "./icons"
-import { ObjectImage } from "./ObjectImage"
+import { AlignedImage, ImageSurface, type ImageSurfaceMode } from "./ImageSurface"
+import type { Side } from "../diffLayout"
 
 /// Breathing room around the versions at fit scale, as the figure view keeps.
 const PADDING = 24
 /// The toolbar's and the keys' zoom step; in and out are exact inverses.
 const BUTTON_STEP = 1.25
 
+type ScrollPosition = Pick<ZoomState, "left" | "top">
+
 /// One frame of the zoom window: a version, what a version shows instead of
-/// its image, or the Difference of two.
+/// its image, or a shared single-frame comparison of two.
 export type ZoomFrame =
     | {
           kind: "image"
@@ -32,19 +35,23 @@ export type ZoomFrame =
       }
     | { kind: "note"; text: string; caption: ReactNode }
     | {
-          kind: "difference"
-          old: DecodedImage
-          next: DecodedImage
+          kind: "comparison"
+          before: DecodedImage
+          after: DecodedImage
+          mode: ImageSurfaceMode
           name: string
           caption: ReactNode
+          onError?: (side: Side) => void
       }
 
 interface ImageZoomProps {
     /// The file's path, the toolbar's title.
     label: string
-    /// Old first, then new; or the one version; or the Difference frame.
+    /// Old first, then new; one version; or a single-frame comparison.
     frames: readonly ZoomFrame[]
-    /// The window's Both/Difference choice, when Difference is offered.
+    /// Keep the union of ALL versions even while Before/After shows just one.
+    extent?: Extents
+    /// The window's image mode, when two drawable versions are available.
     mode: {
         value: ImageMode
         options: readonly ChoiceOption<ImageMode>[]
@@ -58,8 +65,8 @@ function imagesOf(frame: ZoomFrame): DecodedImage[] {
     switch (frame.kind) {
         case "image":
             return [frame.image]
-        case "difference":
-            return [frame.old, frame.next]
+        case "comparison":
+            return [frame.before, frame.after]
         case "note":
             return []
     }
@@ -92,10 +99,10 @@ interface GestureLike extends UIEvent {
  * Command (Control elsewhere) with `+`, `-`, `0` and `9` zooms in, out, to
  * actual size and to fit.
  */
-export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
+export function ImageZoom({ label, frames, extent, mode, onClose }: ImageZoomProps) {
     const viewportRefs = useRef<(HTMLDivElement | null)[]>([])
 
-    const union = unionExtents(frames.flatMap(imagesOf))
+    const union = extent ?? unionExtents(frames.flatMap(imagesOf))
     // One object per size, so a re-render re-registers nothing.
     const content = useMemo<Extents>(
         () => ({ width: union.width, height: union.height }),
@@ -105,7 +112,11 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     /// Null until the frames have been measured and fitted.
     const [scale, setScale] = useState<number | null>(null)
     /// Offsets to write once a scale change has been laid out.
-    const pendingScroll = useRef<{ left: number; top: number } | null>(null)
+    const pendingScroll = useRef<ScrollPosition | null>(null)
+    // A wider mode may clamp the DOM's offsets. Keep the reader's intended
+    // position until they actually pan/zoom again, not just until layout runs.
+    const retainedScroll = useRef<ScrollPosition>({ left: 0, top: 0 })
+    const writtenScroll = useRef(new WeakMap<HTMLDivElement, ScrollPosition>())
 
     const contacts = useRef(new Map<number, Point>())
     const pinch = useRef<[Point, Point] | null>(null)
@@ -149,30 +160,32 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
     // ---- Lockstep -------------------------------------------------------
 
     const writeOffsets = useCallback((left: number, top: number) => {
+        retainedScroll.current = { left, top }
         for (const element of viewportRefs.current) {
             if (element === null) { continue }
             element.scrollLeft = left
             element.scrollTop = top
+            // Record what the browser accepted, which can differ between
+            // modes or even by one scrollbar pixel between the two frames.
+            writtenScroll.current.set(element, { left: element.scrollLeft, top: element.scrollTop })
         }
     }, [])
 
     useLayoutEffect(() => {
-        const pending = pendingScroll.current
-        if (pending === null) { return }
+        const next = pendingScroll.current ?? retainedScroll.current
         pendingScroll.current = null
-        writeOffsets(pending.left, pending.top)
-    }, [scale, writeOffsets])
+        writeOffsets(next.left, next.top)
+    }, [scale, frames.length, mode?.value, writeOffsets])
 
     /// A frame scrolled by the trackpad, the wheel, a scrollbar or the
-    /// keyboard: every other frame follows. Setting an equal offset fires no
-    /// scroll, so the frames cannot echo one another.
+    /// keyboard: every other frame follows. Ignore our own writes (including
+    /// layout-clamped writes), so they neither echo nor discard the position.
     const follow = useCallback((source: HTMLDivElement) => {
-        for (const element of viewportRefs.current) {
-            if (element === null || element === source) { continue }
-            if (element.scrollLeft !== source.scrollLeft) { element.scrollLeft = source.scrollLeft }
-            if (element.scrollTop !== source.scrollTop) { element.scrollTop = source.scrollTop }
-        }
-    }, [])
+        const { scrollLeft: left, scrollTop: top } = source
+        const written = writtenScroll.current.get(source)
+        if (written?.left === left && written.top === top) { return }
+        writeOffsets(left, top)
+    }, [writeOffsets])
 
     const current = useCallback((): ZoomState | null => {
         const element = viewportRefs.current[0]
@@ -372,7 +385,7 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
 
     // ---- Rendering ------------------------------------------------------
 
-    const sized = (image: DecodedImage) =>
+    const sized = (image: Extents) =>
         scale === null
             ? undefined
             : { width: `${image.width * scale}px`, height: `${image.height * scale}px` }
@@ -389,7 +402,13 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
                     <ChoiceGroup
                         options={mode.options}
                         value={mode.value}
-                        onChange={mode.onChange}
+                        onChange={(next) => {
+                            // Capture native scrolling even if its scroll
+                            // event has not yet arrived, before columns resize.
+                            const first = viewportRefs.current[0]
+                            if (first) { follow(first) }
+                            mode.onChange(next)
+                        }}
                         label={`Compare ${label}`}
                     />
                 )}
@@ -474,26 +493,21 @@ export function ImageZoom({ label, frames, mode, onClose }: ImageZoomProps) {
                                         }}
                                     >
                                         {frame.kind === "image" ? (
-                                            <div className="image-zoom__version" style={sized(frame.image)}>
-                                                <ObjectImage
+                                            <div className="image-zoom__version" style={sized(content)}>
+                                                <AlignedImage
                                                     image={frame.image}
+                                                    size={content}
                                                     alt={frame.name}
                                                     onError={frame.onError}
                                                 />
                                             </div>
                                         ) : (
                                             <div
-                                                className="image-zoom__stack"
-                                                role="img"
-                                                aria-label={frame.name}
-                                                style={sized(frame.old)}
+                                                className="image-zoom__comparison"
+                                                style={sized(content)}
                                             >
-                                                <ObjectImage image={frame.old} alt="" />
-                                                <ObjectImage
-                                                    image={frame.next}
-                                                    alt=""
-                                                    className="image-zoom__blend"
-                                                />
+                                                <ImageSurface before={frame.before} after={frame.after}
+                                                    mode={frame.mode} name={frame.name} onError={frame.onError} />
                                             </div>
                                         )}
                                     </div>

@@ -56,10 +56,6 @@
        scheme by design. */
     --dim-opacity: 0.45;
 
-    /* The difference blend's ground (diff-view: *Image Comparison*): every
-       unchanged pixel must come out black, whatever the theme. */
-    --blend-black: #000;
-
     /* No scheme stamped (the bootstrap has not run, or a host never stamps):
        native controls follow the operating system, as the fallback tokens
        below do. A stamped scheme pins them to the resolved one, here and in
@@ -4927,8 +4923,7 @@ body[data-platform="mac"] .split-pane-far {
     padding: var(--space-2) var(--space-3);
 }
 
-/* Side by side, the layout's two halves, old left; in unified, stacked, old
-   above; an added or deleted file's one version across the full width. */
+/* Image layout is independent of the source-code layout. */
 .diff-image-versions {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -4952,6 +4947,7 @@ body[data-platform="mac"] .split-pane-far {
    column, over a checkerboard drawn from the theme. Its box is reserved from
    the width and height attributes before it decodes. */
 .diff-image-frame {
+    position: relative;
     align-self: flex-start;
     max-width: 100%;
     line-height: 0;
@@ -4966,8 +4962,18 @@ body[data-platform="mac"] .split-pane-far {
     background-size: 16px 16px;
 }
 
-.diff-image-frame img,
-.diff-image-difference-frame img {
+.diff-image-frame > .image-surface {
+    position: absolute;
+    inset: 0;
+}
+
+.diff-image-frame::before {
+    content: "";
+    display: block;
+    padding-bottom: var(--image-frame-ratio);
+}
+
+.diff-image-frame img {
     display: block;
     max-width: 100%;
     height: auto;
@@ -4993,32 +4999,168 @@ body[data-platform="mac"] .split-pane-far {
     overflow-wrap: anywhere;
 }
 
-/* Difference: the new version over the old, blended by difference on black,
-   so every unchanged pixel is black. Isolated, so the blend reaches nothing
-   behind the frame. */
-.diff-image-difference-frame {
-    position: relative;
-    align-self: flex-start;
-    max-width: 100%;
-    line-height: 0;
-    background: var(--blend-black);
-    isolation: isolate;
+.diff-image-details {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
 }
 
-.diff-image-difference-frame .diff-image-difference-new {
-    position: absolute;
-    inset: 0;
+.diff-image-caption--pair {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
+}
+
+/* The same aligned image surface runs inline and inside a zoomed union box. */
+.image-surface {
+    position: relative;
     width: 100%;
     height: 100%;
-    mix-blend-mode: difference;
+    background-color: var(--diff-image-check-a);
+    background-image: conic-gradient(
+        var(--diff-image-check-b) 25%, transparent 0 50%,
+        var(--diff-image-check-b) 0 75%, transparent 0
+    );
+    background-size: 16px 16px;
 }
 
-/* The comparison's controls: the Both/Difference group and Zoom. */
+.image-surface__layers,
+.image-surface__layer {
+    position: absolute;
+    inset: 0;
+}
+
+/* The wipe has its own checkerboard: transparent After pixels must replace
+   Before, not accidentally alpha-blend with it. */
+.image-surface__layer {
+    overflow: hidden;
+    background: inherit;
+    background-color: var(--diff-image-check-a);
+    background-image: conic-gradient(
+        var(--diff-image-check-b) 25%, transparent 0 50%,
+        var(--diff-image-check-b) 0 75%, transparent 0
+    );
+    background-size: 16px 16px;
+}
+
+.image-surface__version {
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
+.image-surface__version img,
+.image-surface__pixels {
+    display: block;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+}
+
+.image-surface__status,
+.image-surface__blink-controls {
+    position: absolute;
+    left: var(--space-2);
+    bottom: var(--space-2);
+    max-width: calc(100% - 2 * var(--space-2));
+    padding: var(--space-1) var(--space-2);
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--text-xs);
+    line-height: var(--leading-tight);
+}
+
+.image-surface__blink-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    top: var(--space-2);
+    bottom: auto;
+}
+
+/* Even a 16px icon leaves Pause reachable without covering its pixels. */
+.diff-image-frame--blink {
+    margin-bottom: calc(32px + var(--space-2));
+}
+
+.diff-image-frame .image-surface__blink-controls {
+    top: 100%;
+    left: 0;
+    max-width: none;
+    width: max-content;
+    margin-top: var(--space-1);
+}
+
+.image-surface__divider {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 28px;
+    transform: translateX(-50%);
+    cursor: ew-resize;
+    touch-action: none;
+    user-select: none;
+}
+
+.image-surface__divider::before {
+    content: "";
+    position: absolute;
+    left: 13px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--text);
+    box-shadow: 0 0 0 1px var(--surface);
+}
+
+.image-surface__grip {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    transform: translateY(-50%);
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 32px;
+    border: var(--border-width) solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--text-sm);
+    line-height: 1;
+}
+
+.image-surface__divider:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.image-surface__divider:focus-visible .image-surface__grip {
+    box-shadow: var(--shadow-focus);
+}
+
+/* Text-labelled image modes and Zoom are discoverable without hover. */
 .diff-image-tools {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
+}
+
+.diff-image-tools .settings-choice-row,
+.image-zoom__toolbar .settings-choice-row {
+    margin: 0;
+}
+
+.diff-image-tools .settings-choice,
+.image-zoom__toolbar .settings-choice {
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+}
+
+.image-zoom__toolbar {
+    flex-wrap: wrap;
 }
 
 .diff-image-zoom {
@@ -5098,6 +5240,12 @@ body[data-surface="image"] #root {
     color: var(--text-muted);
 }
 
+.image-zoom__metadata {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-4);
+}
+
 /* Before the versions are read, or when they cannot be. */
 .image-window-status {
     margin: auto;
@@ -5146,7 +5294,7 @@ body[data-surface="image"] #root {
 
 /* Each version at its own scaled size, from the top-left corner. */
 .image-zoom__version,
-.image-zoom__stack {
+.image-zoom__comparison {
     position: absolute;
     top: 0;
     left: 0;
@@ -5163,30 +5311,17 @@ body[data-surface="image"] #root {
     background-size: 16px 16px;
 }
 
-.image-zoom__version img,
-.image-zoom__stack img {
+.image-zoom__version img {
     display: block;
     width: 100%;
     height: 100%;
     max-width: none;
 }
 
-/* Difference, maximized: on black, isolated, the new version blended over
-   the old. */
-.image-zoom__stack {
-    background: var(--blend-black);
-    isolation: isolate;
-}
-
-.image-zoom__stack .image-zoom__blend {
-    position: absolute;
-    inset: 0;
-    mix-blend-mode: difference;
-}
-
 /* Above actual size each pixel stays a sharp square: smoothing would blur
    exactly what a reviewer is checking. */
-.image-zoom__frames--sharp img {
+.image-zoom__frames--sharp img,
+.image-zoom__frames--sharp canvas {
     image-rendering: pixelated;
 }
 

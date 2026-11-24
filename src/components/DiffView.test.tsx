@@ -321,6 +321,99 @@ async function mount(
     }
 }
 
+describe("image review modes through the shared renderer", () => {
+    const imageFile = () => file({
+        oldPath: "screen.png", newPath: "screen.png", content: { kind: "binary" },
+    })
+    const versions: ImageVersions = {
+        old: { kind: "image", mime: "image/png", width: 200, height: 100, data: "AQID" },
+        new: { kind: "image", mime: "image/png", width: 400, height: 300, data: "BAUG" },
+    }
+    const modeGroup = (container: FakeElement) => allElements(container)
+        .find(element => element.getAttribute("aria-label") === "Compare screen.png")!
+    const modeButton = (container: FakeElement, label: string) =>
+        modeGroup(container).findAll("button").find(button => button.textContent === label)!
+
+    test("all modes work with resized images and switching never reads again", async () => {
+        let reads = 0
+        const files = [imageFile()]
+        const view = await mount(files, undefined, {
+            readImage: async () => { reads++; return versions }, imageReads: "onRequest",
+        })
+        try {
+            await press(view.container.findAll("button").find(button => button.textContent === "Show image")!)
+            expect(reads).toBe(1)
+            expect(modeGroup(view.container).findAll("button").map(button => button.textContent)).toEqual([
+                "Diff", "Before", "After", "Side by side", "Slider", "Blink",
+            ])
+            expect(modeButton(view.container, "Side by side").getAttribute("aria-checked")).toBe("true")
+            expect(byClass(view.container, "diff-image-versions--split")).toHaveLength(1)
+            expect(view.container.findAll("img")).toHaveLength(2)
+            for (const label of ["Before", "After", "Slider", "Blink", "Diff", "Side by side"]) {
+                await press(modeButton(view.container, label))
+                expect(modeButton(view.container, label).getAttribute("aria-checked")).toBe("true")
+                expect(reads).toBe(1)
+                if (label === "Before" || label === "After") {
+                    const images = view.container.findAll("img")
+                    expect(images).toHaveLength(1)
+                    expect(images[0].getAttribute("alt")).toBe(`screen.png at ${label === "Before" ? "base" : "head"}`)
+                }
+                if (label === "Slider") {
+                    expect(allElements(view.container).some(element => element.getAttribute("role") === "slider")).toBe(true)
+                    expect(view.container.textContent).toContain("Before · base")
+                    expect(view.container.textContent).toContain("After · head")
+                }
+            }
+            await press(modeButton(view.container, "Slider"))
+            const layoutGroup = allElements(view.container).find(element =>
+                element.getAttribute("role") === "radiogroup" && element !== modeGroup(view.container))!
+            await press(layoutGroup.findAll("button").find(button => button.textContent === "Side by side")!)
+            expect(modeButton(view.container, "Slider").getAttribute("aria-checked")).toBe("true")
+            expect(reads).toBe(1)
+            await view.rerender([...files], undefined)
+            await press(view.container.findAll("button").find(button => button.textContent === "Show image")!)
+            expect(reads).toBe(2)
+            expect(modeButton(view.container, "Side by side").getAttribute("aria-checked")).toBe("true")
+        } finally { await view.unmount() }
+    })
+
+    test("added, deleted and refused versions offer no two-image controls", async () => {
+        for (const pair of [
+            { old: { kind: "absent" }, new: versions.new },
+            { old: versions.old, new: { kind: "absent" } },
+            { old: versions.old, new: { kind: "refused", reason: "tooLarge" } },
+            { old: { kind: "refused", reason: "lfs" }, new: { kind: "refused", reason: "tooLarge" } },
+        ] satisfies ImageVersions[]) {
+            const view = await mount([imageFile()], undefined, {
+                readImage: async () => pair, imageReads: "onRequest",
+            })
+            try {
+                await press(view.container.findAll("button").find(button => button.textContent === "Show image")!)
+                expect(modeGroup(view.container)).toBeUndefined()
+                expect(view.container.findAll("img")).toHaveLength(
+                    Number(pair.old.kind === "image") + Number(pair.new.kind === "image"),
+                )
+                if (pair.new.kind === "refused") { expect(view.container.textContent).toContain("Too large to preview") }
+            } finally { await view.unmount() }
+        }
+    })
+
+    test("a decode failure leaves the other image and a note instead of an active comparison", async () => {
+        const view = await mount([imageFile()], undefined, {
+            readImage: async () => versions, imageReads: "onRequest",
+        })
+        try {
+            await press(view.container.findAll("button").find(button => button.textContent === "Show image")!)
+            await press(modeButton(view.container, "Slider"))
+            const image = view.container.findAll("img")[0]
+            await act(async () => (reactProps(image).onError as () => void)())
+            expect(modeGroup(view.container)).toBeUndefined()
+            expect(view.container.textContent).toContain("Can't be shown here")
+            expect(view.container.findAll("img")).toHaveLength(1)
+        } finally { await view.unmount() }
+    })
+})
+
 describe("PR automatic reads through the shared renderer", () => {
     class NearObserver {
         static all: NearObserver[] = []

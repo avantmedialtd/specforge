@@ -21,7 +21,8 @@ import { ChoiceGroup, type ChoiceOption } from "./ChoiceGroup"
 import {
     Check, ChevronDown, ChevronRight, Circle, CommentIcon, HelpCircle, Maximize, Minus, PartialCircle, RotateCcw,
 } from "./icons"
-import { ObjectImage } from "./ObjectImage"
+import { AlignedImage, ImageSurface, imageSurfaceStyle } from "./ImageSurface"
+import { comparisonSize, type ImageSize } from "../imageDiffPixels"
 import {
     contentStateLabel,
     fileKey,
@@ -79,12 +80,12 @@ import {
     type SplitRow,
 } from "../diffLayout"
 import {
-    DIFFERENCE_CAPTION,
+    IMAGE_MODE_OPTIONS,
     NearViewQueue,
     UNDRAWABLE_TEXT,
     decodeVersions,
-    differenceAvailable,
-    differenceName,
+    comparisonAvailable,
+    comparisonName,
     holdsNoImage,
     imageDetails,
     refusalText,
@@ -247,11 +248,6 @@ const NO_SHOWN: ShownHunks = new Map()
 const NO_IMAGES: ReadonlyMap<string, ImageRead> = new Map()
 const NO_MODES: ReadonlyMap<string, ImageMode> = new Map()
 
-const MODE_OPTIONS: readonly ChoiceOption<ImageMode>[] = [
-    { value: "both", label: "Both" },
-    { value: "difference", label: "Difference" },
-]
-
 const LAYOUT_OPTIONS: readonly ChoiceOption<DiffLayout>[] = [
     { value: "unified", label: "Unified" },
     { value: "split", label: "Side by side" },
@@ -316,7 +312,7 @@ export function DiffView({
     // were shown in, as loaded content does.
     const [shownState, setShownState] = useState(() => ({ files, byKey: NO_SHOWN }))
     const shown = shownState.files === files ? shownState.byKey : NO_SHOWN
-    // An image file's read and its Difference choice belong to the `files`
+    // An image file's read and its comparison mode belong to the `files`
     // array they were made in, as loaded content does: never persisted.
     const [imageState, setImageState] = useState(() => ({ files, byKey: NO_IMAGES }))
     const images = imageState.files === files ? imageState.byKey : NO_IMAGES
@@ -2020,7 +2016,6 @@ const FileSection = memo(function FileSection({
                             manualRequest={manualImageRequest}
                             read={imageRead}
                             mode={imageMode}
-                            layout={layout}
                             sideNames={sideNames}
                             onRequest={onImageRequest}
                             onMode={onImageMode}
@@ -2197,7 +2192,6 @@ interface ImageBodyProps {
     manualRequest: boolean
     read: ImageRead | undefined
     mode: ImageMode
-    layout: DiffLayout
     sideNames: { old: string; new: string }
     onRequest: (file: DiffFile) => void
     onMode: (key: string, mode: ImageMode) => void
@@ -2218,7 +2212,6 @@ function ImageBody({
     manualRequest,
     read,
     mode,
-    layout,
     sideNames,
     onRequest,
     onMode,
@@ -2252,7 +2245,6 @@ function ImageBody({
                 file={file}
                 versions={read.versions}
                 mode={mode}
-                layout={layout}
                 sideNames={sideNames}
                 onMode={onMode}
                 onUndrawable={onUndrawable}
@@ -2302,7 +2294,6 @@ interface ImageComparisonProps {
     file: DiffFile
     versions: DecodedVersions
     mode: ImageMode
-    layout: DiffLayout
     sideNames: { old: string; new: string }
     onMode: (key: string, mode: ImageMode) => void
     onUndrawable: (file: DiffFile) => void
@@ -2310,15 +2301,12 @@ interface ImageComparisonProps {
     onZoom: ((file: DiffFile) => void) | undefined
 }
 
-/// An image file's two versions: side by side in the layout's two halves, old
-/// left, or stacked in unified, old above; one version across the full width
-/// for a file added or deleted; and, for two images of equal dimensions, the
-/// choice of their difference, in one frame on black.
+/// All image-review modes live here, not in a PR-specific renderer. Image
+/// layout is independent of text layout and every version shares one scale.
 const ImageComparison = memo(function ImageComparison({
     file,
     versions,
     mode,
-    layout,
     sideNames,
     onMode,
     onUndrawable,
@@ -2327,6 +2315,7 @@ const ImageComparison = memo(function ImageComparison({
     const key = fileKey(file)
     const path = plainEscaped(key)
     const [undrawable, setUndrawable] = useState<ReadonlySet<Side>>(NO_SIDES)
+    const [diffStatus, setDiffStatus] = useState("")
     const markUndrawable = useCallback(
         (side: Side) => {
             setUndrawable((previous) => new Set(previous).add(side))
@@ -2335,13 +2324,18 @@ const ImageComparison = memo(function ImageComparison({
         [file, onUndrawable],
     )
     const chooseMode = useCallback((next: ImageMode) => onMode(key, next), [key, onMode])
-    const offered = differenceAvailable(versions) && undrawable.size === 0
+    const offered = comparisonAvailable(versions) && undrawable.size === 0
     const sides = (["old", "new"] as const).filter((side) => versions[side].kind !== "absent")
     const before = versions.old.kind === "image" ? versions.old.image : undefined
-    const arrangement = sides.length === 1 ? "single" : layout === "split" ? "split" : "stacked"
-    const difference =
-        offered && mode === "difference" && versions.old.kind === "image" && versions.new.kind === "image"
-            ? { old: versions.old.image, next: versions.new.image }
+    const nextImage = versions.new.kind === "image" ? versions.new.image : undefined
+    const firstSize = before ?? nextImage ?? { width: 1, height: 1 }
+    const size = comparisonSize(firstSize, nextImage ?? firstSize)
+    const shownSides = offered && mode === "before" ? ["old"] as const
+        : offered && mode === "after" ? ["new"] as const : sides
+    const composite =
+        offered && (mode === "diff" || mode === "slider" || mode === "blink")
+            && before && nextImage
+            ? { before, after: nextImage, mode }
             : null
     // Zoom opens the file's own window, when the host lets its files zoom and
     // a version is an image to zoom (`diff-view`: *Image Comparison*,
@@ -2354,8 +2348,8 @@ const ImageComparison = memo(function ImageComparison({
                 <div className="diff-image-tools" data-copy="skip">
                     {offered && (
                         <ChoiceGroup
-                            options={MODE_OPTIONS}
-                            value={mode}
+                            options={IMAGE_MODE_OPTIONS}
+                            value={offered ? mode : "both"}
                             onChange={chooseMode}
                             label={`Compare ${path}`}
                         />
@@ -2373,16 +2367,29 @@ const ImageComparison = memo(function ImageComparison({
                     )}
                 </div>
             )}
-            {difference ? (
-                <DifferenceFrame
-                    old={difference.old}
-                    next={difference.next}
-                    name={differenceName(path, plainEscaped(sideNames.old), plainEscaped(sideNames.new))}
-                    onOpen={zoom}
-                />
+            {composite ? (
+                <figure className="diff-image-version">
+                    <div className={mode === "diff" && zoom
+                        ? "diff-image-frame diff-image-frame--zoomable"
+                        : mode === "blink" ? "diff-image-frame diff-image-frame--blink" : "diff-image-frame"}
+                        style={imageSurfaceStyle(size)} onClick={mode === "diff" ? zoom : undefined}>
+                        <ImageSurface before={composite.before} after={composite.after}
+                            mode={composite.mode}
+                            name={comparisonName(mode, path, plainEscaped(sideNames.old), plainEscaped(sideNames.new))}
+                            onError={markUndrawable} onStatus={setDiffStatus} />
+                    </div>
+                    {mode === "diff" && <div className="diff-image-details" role="status" data-copy-line="">{diffStatus}</div>}
+                    <figcaption className="diff-image-caption diff-image-caption--pair">
+                        {sides.map(side => (
+                            <ImageCaption key={side} side={side} sideName={sideNames[side]}
+                                image={side === "old" ? composite.before : composite.after}
+                                before={side === "new" ? before : undefined} />
+                        ))}
+                    </figcaption>
+                </figure>
             ) : (
-                <div className={`diff-image-versions diff-image-versions--${arrangement}`}>
-                    {sides.map((side) => (
+                <div className={`diff-image-versions diff-image-versions--${shownSides.length === 1 ? "single" : "split"}`}>
+                    {shownSides.map((side) => (
                         <ImageVersion
                             key={side}
                             side={side}
@@ -2390,6 +2397,7 @@ const ImageComparison = memo(function ImageComparison({
                             sideName={sideNames[side]}
                             path={path}
                             before={side === "new" ? before : undefined}
+                            size={size}
                             undrawable={undrawable.has(side)}
                             onUndrawable={markUndrawable}
                             onOpen={zoom}
@@ -2413,6 +2421,7 @@ function ImageVersion({
     sideName,
     path,
     before,
+    size,
     undrawable,
     onUndrawable,
     onOpen,
@@ -2422,6 +2431,7 @@ function ImageVersion({
     sideName: string
     path: string
     before: DecodedImage | undefined
+    size: ImageSize
     undrawable: boolean
     onUndrawable: (side: Side) => void
     /// Opens the zoom window, as a click on the version asks; undefined
@@ -2443,64 +2453,37 @@ function ImageVersion({
                 <div
                     className={onOpen ? "diff-image-frame diff-image-frame--zoomable" : "diff-image-frame"}
                     onClick={onOpen}
+                    style={imageSurfaceStyle(size)}
                 >
-                    <ObjectImage
-                        image={image}
-                        alt={versionName(path, plainEscaped(sideName))}
-                        onError={() => onUndrawable(side)}
-                    />
+                    <div className="image-surface">
+                        <AlignedImage image={image} size={size}
+                            alt={versionName(path, plainEscaped(sideName))}
+                            onError={() => onUndrawable(side)} />
+                    </div>
                 </div>
             ) : (
                 <div className="diff-image-note">{note}</div>
             )}
             <figcaption className="diff-image-caption">
-                <span className="diff-image-side" data-copy-line="">
-                    <EscapedText text={sideName} />
-                </span>
-                {image && (
-                    <span className="diff-image-details" data-copy-line="">
-                        {imageDetails(image, before)}
-                    </span>
-                )}
+                <ImageCaption side={side} sideName={sideName} image={image ?? undefined} before={before} />
             </figcaption>
         </figure>
     )
 }
 
-/// The Difference frame: the new version blended over the old by difference,
-/// on black, so every unchanged pixel is black.
-function DifferenceFrame({
-    old,
-    next,
-    name,
-    onOpen,
-}: {
-    old: DecodedImage
-    next: DecodedImage
-    name: string
-    onOpen: (() => void) | undefined
+function ImageCaption({ side, sideName, image, before }: {
+    side: Side
+    sideName: string
+    image: DecodedImage | undefined
+    before: DecodedImage | undefined
 }) {
     return (
-        <figure className="diff-image-version diff-image-difference">
-            <div
-                className={
-                    onOpen
-                        ? "diff-image-difference-frame diff-image-frame--zoomable"
-                        : "diff-image-difference-frame"
-                }
-                role="img"
-                aria-label={name}
-                onClick={onOpen}
-            >
-                <ObjectImage image={old} alt="" />
-                <ObjectImage image={next} alt="" className="diff-image-difference-new" />
-            </div>
-            <figcaption className="diff-image-caption">
-                <span className="diff-image-details" data-copy-line="">
-                    {DIFFERENCE_CAPTION}
-                </span>
-            </figcaption>
-        </figure>
+        <span className="diff-image-caption">
+            <span className="diff-image-side" data-copy-line="">
+                {side === "old" ? "Before" : "After"} · <EscapedText text={sideName} />
+            </span>
+            {image && <span className="diff-image-details" data-copy-line="">{imageDetails(image, before)}</span>}
+        </span>
     )
 }
 

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { getCommitFileImage, getPullRequestFileImage } from "../api"
 import {
-    DIFFERENCE_CAPTION,
+    IMAGE_MODE_OPTIONS,
     UNDRAWABLE_TEXT,
     decodeVersions,
-    differenceAvailable,
-    differenceName,
+    comparisonAvailable,
+    comparisonName,
     holdsNoImage,
     imageDetails,
     refusalText,
@@ -23,14 +23,10 @@ import {
 } from "../imageWindow"
 import { fileFailureText } from "../pullRequestView"
 import type { ImageVersions } from "../types"
+import { unionExtents } from "../imageZoom"
 import { EscapedText } from "./DiffView"
 import { EmptyState } from "./EmptyState"
 import { ImageZoom, type ZoomFrame } from "./ImageZoom"
-
-const MODE_OPTIONS = [
-    { value: "both" as const, label: "Both" },
-    { value: "difference" as const, label: "Difference" },
-]
 
 const NO_SIDES: ReadonlySet<Side> = new Set()
 
@@ -84,7 +80,7 @@ type WindowRead =
 /// the desktop and a tab in the browser skin, both carrying the address in
 /// `at`. It reads the versions itself, from the address, and refuses any
 /// address it cannot read as one. It closes on Escape and Command/Control-W,
-/// and its Both/Difference choice is its own.
+/// and its image comparison mode is its own.
 export function ImageWindowRoot() {
     const source = useMemo(
         () => parseImageWindowAddress(new URLSearchParams(window.location.search).get("at")),
@@ -138,20 +134,39 @@ export function ImageWindowRoot() {
 
     const path = plainEscaped(source.path)
     const sides = source.sides
-    const offered = differenceAvailable(versions) && undrawable.size === 0
+    const offered = comparisonAvailable(versions) && undrawable.size === 0
     const before = versions.old.kind === "image" ? versions.old.image : undefined
+    const after = versions.new.kind === "image" ? versions.new.image : undefined
+    const extent = unionExtents([before, after].filter(image => image !== undefined))
+    const caption = (side: Side) => {
+        const image = side === "old" ? before : after
+        return (
+            <>
+                {side === "old" ? "Before" : "After"} · <EscapedText text={sides[side]} />
+                {image && <span className="image-zoom__details">
+                    {" · "}{imageDetails(image, side === "new" ? before : undefined)}
+                </span>}
+            </>
+        )
+    }
+    const shownSides = offered && mode === "before" ? ["old"] as const
+        : offered && mode === "after" ? ["new"] as const : ["old", "new"] as const
     const frames: ZoomFrame[] =
-        offered && mode === "difference" && versions.old.kind === "image" && versions.new.kind === "image"
+        offered && (mode === "diff" || mode === "slider" || mode === "blink") && before && after
             ? [
                   {
-                      kind: "difference",
-                      old: versions.old.image,
-                      next: versions.new.image,
-                      name: differenceName(path, plainEscaped(sides.old), plainEscaped(sides.new)),
-                      caption: DIFFERENCE_CAPTION,
+                      kind: "comparison",
+                      before,
+                      after,
+                      mode,
+                      name: comparisonName(mode, path, plainEscaped(sides.old), plainEscaped(sides.new)),
+                      caption: <span className="image-zoom__metadata">
+                          <span>{caption("old")}</span><span>{caption("new")}</span>
+                      </span>,
+                      onError: markUndrawable,
                   },
               ]
-            : (["old", "new"] as const)
+            : shownSides
                   .filter((side) => versions[side].kind !== "absent")
                   .map((side): ZoomFrame => {
                       const version = versions[side]
@@ -160,30 +175,23 @@ export function ImageWindowRoot() {
                               kind: "image",
                               image: version.image,
                               name: versionName(path, plainEscaped(sides[side])),
-                              caption: (
-                                  <>
-                                      <EscapedText text={sides[side]} />
-                                      <span className="image-zoom__details">
-                                          {" · "}
-                                          {imageDetails(version.image, side === "new" ? before : undefined)}
-                                      </span>
-                                  </>
-                              ),
+                               caption: caption(side),
                               onError: () => markUndrawable(side),
                           }
                       }
                       return {
                           kind: "note",
                           text: version.kind === "refused" ? refusalText(version.reason) : UNDRAWABLE_TEXT,
-                          caption: <EscapedText text={sides[side]} />,
+                           caption: caption(side),
                       }
                   })
 
     return (
         <ImageZoom
-            label={source.path}
+            label={path}
             frames={frames}
-            mode={offered ? { value: mode, options: MODE_OPTIONS, onChange: setMode } : null}
+            extent={extent}
+            mode={offered ? { value: mode, options: IMAGE_MODE_OPTIONS, onChange: setMode } : null}
             onClose={closeDetachedWindow}
         />
     )

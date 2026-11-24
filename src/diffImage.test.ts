@@ -3,12 +3,17 @@ import {
     decodeBase64,
     decodeSide,
     decodeVersions,
-    differenceAvailable,
-    differenceName,
+    comparisonAvailable,
+    comparisonName,
+    IMAGE_MODE_OPTIONS,
     formatBytes,
     holdsNoImage,
     imageDetails,
     NearViewQueue,
+    clampReveal,
+    revealAt,
+    revealKey,
+    pixelDiffSummary,
     refusalText,
     sizeDelta,
     UNDRAWABLE_TEXT,
@@ -16,6 +21,8 @@ import {
     type DecodedImage,
     type DecodedSide,
 } from "./diffImage"
+import { exifJpeg } from "./testing/exifJpeg"
+import { canHighlight, comparisonSize } from "./imageDiffPixels"
 
 const KIB = 1024
 const MIB = 1024 * 1024
@@ -54,6 +61,78 @@ describe("decoding", () => {
         expect(
             decodeVersions({ old: { kind: "absent" }, new: { kind: "refused", reason: "tooLarge" } }),
         ).toEqual({ old: { kind: "absent" }, new: { kind: "refused", reason: "tooLarge" } })
+    })
+
+    test("EXIF orientation determines JPEG dimensions before frames or pixels are allocated", () => {
+        for (const little of [false, true]) {
+            for (const orientation of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) {
+                const bytes = exifJpeg(orientation, little)
+                const side = decodeSide({
+                    kind: "image", mime: "image/jpeg", width: 200, height: 100,
+                    data: btoa(String.fromCharCode(...bytes)),
+                })
+                if (side.kind !== "image") { throw new Error("accepted JPEG was refused") }
+                const swapped = orientation >= 5 && orientation <= 8
+                expect([side.image.width, side.image.height]).toEqual(swapped ? [100, 200] : [200, 100])
+                expect(side.image.bytes).toEqual(bytes)
+            }
+        }
+    })
+
+    test("orientation-aware union extents enforce the pixel ceiling before decoding", () => {
+        const pair = decodeVersions({
+            old: { kind: "image", mime: "image/jpeg", width: 3000, height: 1000,
+                data: btoa(String.fromCharCode(...exifJpeg(6))) },
+            new: { kind: "image", mime: "image/png", width: 3000, height: 1000, data: "" },
+        })
+        if (pair.old.kind !== "image" || pair.new.kind !== "image") { throw new Error("missing version") }
+        expect(comparisonSize(pair.old.image, pair.new.image)).toEqual({ width: 3000, height: 3000 })
+        expect(canHighlight(pair.old.image, pair.new.image)).toBe(false)
+    })
+
+    test("JPEG metadata walking skips other segments and stops before compressed pixels", () => {
+        const exif = exifJpeg(6)
+        const withOtherSegments = Uint8Array.from([
+            ...exif.slice(0, 2),
+            0xff, 0xe0, 0, 4, 0, 0, // APP0
+            0xff, 0xe1, 0, 8, 1, 2, 3, 4, 5, 6, // Not EXIF (e.g. XMP)
+            0xff, 0xff, 0x01, // Fill byte and a standalone marker
+            ...exif.slice(2),
+        ])
+        const inScan = Uint8Array.from([0xff, 0xd8, 0xff, 0xda, ...exif.slice(2)])
+        for (const [bytes, width, height] of [
+            [withOtherSegments, 100, 200], [inScan, 200, 100],
+        ] as const) {
+            expect(decodeSide({ kind: "image", mime: "image/jpeg", width: 200, height: 100,
+                data: btoa(String.fromCharCode(...bytes)) }))
+                .toMatchObject({ kind: "image", image: { width, height } })
+        }
+    })
+
+    test("malformed or truncated EXIF metadata safely keeps the service dimensions", () => {
+        const corruptions = [
+            (bytes: Uint8Array) => { bytes[4] = 0xff },
+            (bytes: Uint8Array) => { bytes[12] = 0 },
+            (bytes: Uint8Array) => { bytes[15] = 0 },
+            (bytes: Uint8Array) => { bytes[16] = 0xff },
+            (bytes: Uint8Array) => { bytes[21] = 2 },
+            (bytes: Uint8Array) => { bytes[25] = 4 },
+            (bytes: Uint8Array) => { bytes[29] = 2 },
+        ]
+        const cases = corruptions.map(corrupt => {
+            const bytes = exifJpeg(6)
+            corrupt(bytes)
+            return bytes
+        })
+        const complete = exifJpeg(6)
+        for (let length = 0; length < 38; length++) { cases.push(complete.slice(0, length)) }
+        for (const bytes of cases) {
+            const side = decodeSide({
+                kind: "image", mime: "image/jpeg", width: 200, height: 100,
+                data: btoa(String.fromCharCode(...bytes)),
+            })
+            expect(side).toMatchObject({ kind: "image", image: { width: 200, height: 100 } })
+        }
     })
 
     test("a read with every side absent or not an image holds no image", () => {
@@ -100,16 +179,47 @@ describe("sizes", () => {
     })
 })
 
-describe("the Difference mode", () => {
-    test("is offered only for two images of equal dimensions", () => {
-        expect(differenceAvailable({ old: image(512, 512), new: image(512, 512) })).toBe(true)
-        expect(differenceAvailable({ old: image(512, 512), new: image(1024, 1024) })).toBe(false)
-        expect(differenceAvailable({ old: image(512, 256), new: image(512, 512) })).toBe(false)
-        expect(differenceAvailable({ old: image(256, 512), new: image(512, 512) })).toBe(false)
-        expect(differenceAvailable({ old: { kind: "absent" }, new: image(16, 16) })).toBe(false)
-        expect(
-            differenceAvailable({ old: image(16, 16), new: { kind: "refused", reason: "lfs" } }),
-        ).toBe(false)
+describe("image review modes", () => {
+    test("all six modes work with resized images but need two accepted sides", () => {
+        expect(IMAGE_MODE_OPTIONS.map(option => option.label)).toEqual([
+            "Diff", "Before", "After", "Side by side", "Slider", "Blink",
+        ])
+        expect(comparisonAvailable({ old: image(512, 512), new: image(1024, 256) })).toBe(true)
+        expect(comparisonAvailable({ old: image(1, 1), new: image(1, 1) })).toBe(true)
+        for (const missing of [
+            { kind: "absent" },
+            { kind: "refused", reason: "tooLarge" },
+        ] as const) {
+            expect(comparisonAvailable({ old: missing, new: image(1, 1) })).toBe(false)
+            expect(comparisonAvailable({ old: image(1, 1), new: missing })).toBe(false)
+        }
+        expect(comparisonName("slider", "screen.png", "base", "head")).toBe(
+            "screen.png: Slider between base and head",
+        )
+    })
+
+    test("a reveal is clamped and usable by pointer and keyboard", () => {
+        expect(clampReveal(-5)).toBe(0)
+        expect(clampReveal(105)).toBe(100)
+        expect(clampReveal(NaN)).toBe(50)
+        expect(revealAt(150, 50, 200)).toBe(50)
+        expect(revealAt(-10, 50, 200)).toBe(0)
+        expect(revealAt(300, 50, 200)).toBe(100)
+        expect(revealAt(1, 1, 0)).toBe(50)
+        for (const key of ["ArrowRight", "ArrowUp"]) { expect(revealKey(key, 50)).toBe(51) }
+        for (const key of ["ArrowLeft", "ArrowDown"]) { expect(revealKey(key, 50)).toBe(49) }
+        expect(revealKey("Home", 50)).toBe(0)
+        expect(revealKey("End", 50)).toBe(100)
+        expect(revealKey("PageUp", 95)).toBe(100)
+        expect(revealKey("PageDown", 5)).toBe(0)
+        expect(revealKey("Escape", 50)).toBeNull()
+    })
+
+    test("pixel summaries distinguish identical, single-pixel and tiny changes", () => {
+        expect(pixelDiffSummary(0, 400)).toBe("No pixels changed (0%)")
+        expect(pixelDiffSummary(1, 100)).toBe("1 pixel changed (1%)")
+        expect(pixelDiffSummary(2304, 40000)).toBe("2,304 pixels changed (5.76%)")
+        expect(pixelDiffSummary(1, 4000000)).toBe("1 pixel changed (<0.01%)")
     })
 })
 
@@ -124,8 +234,8 @@ describe("wording", () => {
 
     test("versions are named by path and side", () => {
         expect(versionName("icons/app.png", "abc1234")).toBe("icons/app.png at abc1234")
-        expect(differenceName("icons/app.png", "abc1234", "def5678")).toBe(
-            "icons/app.png: difference between abc1234 and def5678",
+        expect(comparisonName("diff", "icons/app.png", "abc1234", "def5678")).toBe(
+            "icons/app.png: Diff between abc1234 and def5678",
         )
     })
 })

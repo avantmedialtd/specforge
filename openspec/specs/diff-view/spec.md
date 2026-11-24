@@ -334,7 +334,7 @@ The diff view SHALL lay out the same model in either of two layouts, unified and
 In **both layouts**:
 
 - the hunk header, `@@ -a,b +c,d @@` with its section heading, SHALL be one full-width row;
-- a withheld, too-large, binary or hunk-less file SHALL show the same full-width state row, with the same loader where one is offered, and a withheld file loaded while side by side is in effect SHALL render side by side. An image file SHALL instead show its versions, side by side in the left and right halves or stacked in unified, as the *Image Comparison* requirement says;
+- a withheld, too-large, binary or hunk-less file SHALL show the same full-width state row, with the same loader where one is offered, and a withheld file loaded while side by side is in effect SHALL render side by side. An image file SHALL instead use its own comparison modes, independent of the text layout, as the *Image Comparison* requirement says;
 - the no-newline flag SHALL show as a small badge in each cell that shows the line it marks, so side by side a flagged context line carries it on both sides;
 - the sticky file header SHALL be the section's own, above its rows: never a cell of the side-by-side grid, and outside unified's sideways scroller;
 - tabs SHALL render at one width;
@@ -1004,10 +1004,10 @@ $$\text{tooManyPixels}(s) \iff \max_{c \,\in\, \{s\} \cup C(s)} w(c) \cdot h(c) 
 - **No image at all.** A file whose sides are all absent or refused as `notImage` SHALL show the state row it would show if it were not an image file.
 
 **Rendering.**
-- **Layouts.** Side by side, the old version SHALL sit in the left half and the new in the right. In unified they SHALL stack, old above new. An added or deleted file SHALL show its one version across the section's full width, in both layouts.
-- **Captions.** Each version SHALL be captioned with its side's name, as the toolbar names it and with the escapes the *Hidden Characters Are Shown* requirement gives side names, then its width and height and its size. When both sides are images, the new side's caption SHALL add the change in size, as bytes and as a whole percentage of the old size.
+- **Layouts.** Image comparisons SHALL be independent of text diff layout. Side by side SHALL be the default, old left and new right. An added or deleted file SHALL show its one version across the section's full width. A refused or undrawable side SHALL retain its note beside any drawable version.
+- **Captions.** Each version SHALL be captioned with Before or After, its side's name with the escapes the *Hidden Characters Are Shown* requirement gives side names, then its width and height and its size. When both sides are images, the new side's caption SHALL add the change in size, as bytes and as a whole percentage of the old size. Composite modes SHALL retain both versions' metadata.
 - **Sizes.** A size SHALL be written in bytes below 1 KB, and otherwise in KB or MB of 1,024 units: one decimal below 10, none from 10 up ("812 B", "345 KB", "1.4 MB").
-- **Drawing.** Each version SHALL be drawn over a checkerboard, at its natural size and never larger, scaled down to fit its column. Its box SHALL be reserved from its width and height before it decodes.
+- **Drawing.** Versions SHALL share one scale and top-left alignment within their union extents. Each inline version SHALL be drawn over a checkerboard, at its natural size and never larger, scaled down to fit. Its box SHALL be reserved before it decodes. Different dimensions SHALL NOT stretch a version to match the other.
 - **What a side shows instead of its image:**
 
 | Side | It reads |
@@ -1018,49 +1018,47 @@ $$\text{tooManyPixels}(s) \iff \max_{c \,\in\, \{s\} \cup C(s)} w(c) \cdot h(c) 
 | refused `tooManyPixels` | "Too many pixels to preview" |
 | an image the view cannot draw | "Can't be shown here" |
 
-**Difference.** When both sides are images of equal width and equal height, the section SHALL offer a choice of "Both", the default, and "Difference".
-- **What Difference shows.** One frame across the section's full width, on black, with the new version blended over the old by difference, so that every unchanged pixel is black. Its caption says so.
-- **The control.** It SHALL be a radio group with one Tab stop, operated by the arrow keys as the layout control is (see the *Keyboard and Accessibility* requirement).
-- **The choice.** It SHALL be view state held per file. It SHALL NOT be a preference, SHALL NOT be persisted, SHALL be dropped when the host passes a new model, and SHALL render the same in either layout.
+**Modes.** Comparison modes SHALL follow the *Image Comparison Modes*, *Bounded Highlighted Image Diffs* and *Interactive Image Comparison* requirements. The mode radio group SHALL follow the *Keyboard and Accessibility* requirement.
 
 **The reader's place.** When an image file's read completes and its comparison replaces its placeholder, the view SHALL keep the reader's place as the *Folded Hunks* requirement keeps it for a change from elsewhere: the topmost visible line stays where it was.
 
 **Accessibility and copying.**
-- **Names.** Each version SHALL be named by its file's path and its side's name ("icons/app.png at abc1234"). The Difference frame SHALL be named by its path and both sides' names.
-- **Copying.** Captions SHALL copy as text in document order. The "Show image", "Try again", zoom and mode controls SHALL be left out of every copy, as the controls of a folded hunk are (see the *Selection and Copying* requirement).
+- **Names.** Each version SHALL be named by its file's path and its side's name ("icons/app.png at abc1234"). Composite frames SHALL be named by their mode, path and both side names.
+- **Copying.** Captions SHALL copy as text in document order. Image-loading, zoom, mode, slider and blink controls SHALL be left out of every copy, as the controls of a folded hunk are (see the *Selection and Copying* requirement).
 
-**Zooming.** A host MAY let its image files zoom. Each comparison of such a host SHALL then offer a "Zoom" control, and SHALL treat a click on a version as the same request, to open the file's versions in a **window of their own**: a native window in the desktop application, and a tab in the browser skin.
+**Zooming.** A host MAY let its image files zoom. Each comparison of such a host SHALL then offer a "Zoom" control, and SHALL treat a click on a version as the same request, to open the file's versions in a **window of their own**: a native window in the desktop application, and a tab in the browser skin. Operating a slider or blink control SHALL NOT open a window.
 - **One window per file.** Asking again for a file whose window is open SHALL focus that window rather than open another.
 - **What it reads.** The window SHALL be addressed by what names the versions, never by their bytes: a commit's repository, commit and paths, or a pull request's reference, path and commits, with the two side names. It SHALL read the versions through the same command its host's image reader uses, governed as that read is, and SHALL check them as this requirement says.
-- **What it shows.** Both versions in two equal frames side by side, old left, each captioned with its side's name; the one version of an added or deleted file; or, while Difference is chosen, the Difference frame. Difference SHALL be offered on the terms above, starting at Both, and the window's choice SHALL be its own.
-- **Lockstep.** Both frames SHALL share one scale and one position. Zooming or panning either moves both, so the same pixel of each version sits at the same place in its frame, with both versions aligned at their top-left corners.
+- **What it shows.** The window SHALL offer the same six modes on the same terms, defaulting to Side by side with an independent choice; or the available versions and refusal notes.
+- **Lockstep.** Both frames SHALL share one scale and one position. Zooming or panning either moves both, so the same pixel of each version sits at the same place in its frame, with both versions aligned at their top-left corners. A mode switch SHALL retain the scale and the first frame's position.
 - **Gestures.** The window SHALL follow the platform's gestures:
   - two-finger scrolling on a trackpad, and the mouse wheel, SHALL pan, with the platform's momentum;
   - a pinch SHALL zoom, anchored at the pointer, as SHALL the wheel with Control;
-  - dragging SHALL pan, and on a touch screen two contacts SHALL pinch;
+  - dragging SHALL pan, and on a touch screen two contacts SHALL pinch; dragging the slider divider SHALL adjust the wipe instead;
   - Command (Control elsewhere) with `+` or `=` and with `-` SHALL zoom in and out, with `0` SHALL show actual size, and with `9` SHALL fit;
   - Escape and Command-W (Control-W elsewhere) SHALL close the window.
 - **Controls.** Zoom in, zoom out, fit, actual size and close, beside the current scale. It SHALL open at fit, every version wholly visible.
 - **Bounds.** With $$s_{\text{fit}}$$ taken over the extents that hold both versions, the scale SHALL stay within $$\bigl[\min(s_{\text{fit}}, 1),\ 32\bigr]$$.
-- **Pixels.** Above actual size, each version SHALL be drawn with its pixels kept square and sharp, never smoothed.
+- **Pixels.** Above actual size, each version and generated diff SHALL be drawn with its pixels kept square and sharp, never smoothed.
 - **Safety.** The window SHALL load nothing from a URL that names a host, under the content-security policy of a pull-request window, and SHALL be granted no permission beyond closing itself. Opening it SHALL change nothing in the diff it was opened from.
 
 #### Scenario: Two versions sit side by side
 
-- **WHEN** side by side is in effect and a commit modifies `icons/app.png`, a 512 × 512 PNG of 345 KB that became 298 KB
-- **THEN** its section shows the old version in the left half and the new in the right, each over a checkerboard
-- **AND** the old caption reads its side's name, "512 × 512" and "345 KB", and the new caption adds "−47 KB (−14%)"
+- **WHEN** a commit modifies `icons/app.png`, a 512 × 512 PNG of 345 KB that became 298 KB
+- **THEN** its section defaults to the old version on the left and the new on the right, each over a checkerboard
+- **AND** the old caption reads Before, its side's name, "512 × 512" and "345 KB", and the new caption adds "−47 KB (−14%)"
 
 #### Scenario: Unified stacks the versions
 
 - **WHEN** unified is in effect and an image file is modified
-- **THEN** its old version renders above its new version, each across the section's width
+- **THEN** its default image comparison is still Side by side
+- **AND** changing the text layout neither changes the image mode nor reads the versions again
 
 #### Scenario: An added image shows one version
 
 - **WHEN** a commit adds `icons/new.png`
-- **THEN** its section shows only the new version, across its full width, in either layout
-- **AND** no Difference choice is offered
+- **THEN** its section shows only the new version across its full width in either layout
+- **AND** no two-image mode choice is offered
 
 #### Scenario: A hunk-less image file shows its versions
 
@@ -1110,20 +1108,34 @@ $$\text{tooManyPixels}(s) \iff \max_{c \,\in\, \{s\} \cup C(s)} w(c) \cdot h(c) 
 - **WHEN** a read finds both sides of `data/blob.png` refused as `notImage`
 - **THEN** its section shows "Binary file not shown", as any binary file's does
 
+#### Scenario: Different dimensions preserve alignment
+
+- **WHEN** an image file's old version is 512 × 512 and its new version is 1024 × 1024
+- **THEN** all six comparison modes are offered
+- **AND** the old version occupies its original half-width and half-height at the same scale, without stretching
+
+#### Scenario: JPEG orientation preserves the decoded aspect ratio
+
+- **WHEN** an accepted JPEG has raw dimensions 200 × 100 and EXIF orientation 6
+- **THEN** inline frames, zoom frames, captions and pixel comparison use its oriented dimensions of 100 × 200 without stretching
+- **AND** the orientation-aware union is checked against the pixel-work limit before allocating comparison canvases
+
 #### Scenario: Difference needs equal dimensions
 
 - **WHEN** an image file's old version is 512 × 512 and its new version is 1024 × 1024
-- **THEN** no Difference choice is offered
+- **THEN** the legacy black-background Difference mode is not offered
+- **AND** the replacement Diff, Slider and Blink modes are offered without an equal-dimensions restriction
 
 #### Scenario: Difference shows unchanged pixels as black
 
-- **WHEN** the reader chooses Difference for an icon whose versions differ only in a 48 × 48 square
-- **THEN** one frame shows the icon black except where the square changed
+- **WHEN** the reader chooses Diff for an icon whose versions differ only in a 48 × 48 square
+- **THEN** changed pixels in the square are highlighted over a muted unchanged image
+- **AND** a text summary reports the changed pixel count and percentage
 
 #### Scenario: Difference is not remembered
 
-- **WHEN** the reader chooses Difference for one image file and the host then passes a new model
-- **THEN** that file shows Both
+- **WHEN** the reader chooses Diff for one image file and the host then passes a new model
+- **THEN** that file shows Side by side
 - **AND** nothing about the choice was written to the application settings or to the surface's storage
 
 #### Scenario: A section far from the view reads nothing
@@ -1139,7 +1151,7 @@ $$\text{tooManyPixels}(s) \iff \max_{c \,\in\, \{s\} \cup C(s)} w(c) \cdot h(c) 
 
 #### Scenario: Collapsing and switching read nothing again
 
-- **WHEN** an image file has been read, and the reader collapses and expands its section, switches the layout, and chooses Difference
+- **WHEN** an image file has been read, and the reader collapses and expands its section, switches the layout, and chooses Diff
 - **THEN** no further read is made for it
 
 #### Scenario: A read on request waits for the reader
@@ -1155,7 +1167,7 @@ $$\text{tooManyPixels}(s) \iff \max_{c \,\in\, \{s\} \cup C(s)} w(c) \cdot h(c) 
 #### Scenario: A version the view cannot draw says so
 
 - **WHEN** a side is an image whose type the platform's web view cannot draw
-- **THEN** that side reads "Can't be shown here", and the other side still shows its image
+- **THEN** that side reads "Can't be shown here", the other side still shows its image, and no two-image modes remain active
 
 #### Scenario: Versions are named for assistive technology
 
@@ -1202,6 +1214,90 @@ $$\text{tooManyPixels}(s) \iff \max_{c \,\in\, \{s\} \cup C(s)} w(c) \cdot h(c) 
 - **WHEN** the reader opens the zoom window of a pull request's image file whose merge base is known
 - **THEN** the window reads the versions through `get_pull_request_file_image`, sending its two version requests and nothing else
 - **AND** it renders them under the pull-request window's content-security policy
+
+#### Scenario: Before and After isolate their version
+
+- **WHEN** the reader chooses Before and then After
+- **THEN** one full-width frame shows only the selected version with its metadata, without another provider read
+
+#### Scenario: Zoom mode switches preserve the inspected region
+
+- **WHEN** the reader pans a zoomed comparison and switches from Side by side to Slider and back
+- **THEN** the scale and the first frame's scroll position are retained, with the second frame following when it returns
+
+#### Scenario: A wider mode clamps without losing the retained position
+
+- **WHEN** the reader pans near a zoomed comparison's right edge, switches to Slider and then back to Side by side
+- **THEN** temporary browser scroll clamping in the wider Slider viewport does not overwrite the retained position, and both returning frames restore that position
+- **AND** if the reader pans while in Slider, the new position is retained instead
+
+### Requirement: Image Comparison Modes
+
+Two drawable images, even of unequal sizes, SHALL offer Diff, Before, After, Side by side, Slider and Blink independently of text layout. The per-file mode SHALL default to Side by side, stay unpersisted and reset with a new model. Its visible radio group SHALL have one Tab stop and arrow-key selection. Before/After SHALL isolate one version full-width at the common scale. Missing, refused or undrawable sides SHALL fall back to available versions and notes without two-image modes.
+
+#### Scenario: Unequal versions expose every comparison mode
+- **WHEN** both versions are drawable images with different dimensions
+- **THEN** the visible mode group offers Diff, Before, After, Side by side, Slider and Blink
+- **AND** Side by side is selected initially regardless of the text diff layout
+
+#### Scenario: The mode group has one keyboard stop
+- **WHEN** the reader tabs to the image mode group and presses an arrow key
+- **THEN** the selected choice is the group's only Tab stop, and the arrow key moves focus and selection as the text layout control does
+
+#### Scenario: Individual modes isolate the selected version
+- **WHEN** the reader chooses Before or After
+- **THEN** one full-width frame shows only that version at the comparison's common scale
+
+#### Scenario: Mode state belongs to one file and model
+- **WHEN** the reader chooses a mode for one image file and the host later passes a new model
+- **THEN** other files' choices are unaffected, and the new model starts that file at Side by side
+- **AND** the choice is never written to application settings or surface storage
+
+#### Scenario: An unavailable side ends an active two-image mode
+- **WHEN** an image version becomes undrawable while a two-image mode is selected, or a version is missing or refused
+- **THEN** the view falls back to the available versions and their refusal or undrawable notes
+- **AND** it offers no two-image mode group
+
+### Requirement: Bounded Highlighted Image Diffs
+
+Diff SHALL compute locally on demand from accepted image bytes, highlight changed pixels over muted unchanged content and report changed count/percentage. It SHALL compare top-left-aligned union extents, distinguish added/removed area from transparency, and bound pixel processing separately from image acceptance. Failure, cancellation or an oversized comparison SHALL preserve every other mode and SHALL NOT trigger another provider read.
+
+#### Scenario: Identical pixels
+- **WHEN** two images decode to identical pixels and dimensions
+- **THEN** Diff reports zero changed pixels
+
+#### Scenario: Transparency and resized edges
+- **WHEN** versions have transparent pixels and different dimensions
+- **THEN** Diff compares visible pixel content consistently and highlights added or removed image area even if transparent
+
+#### Scenario: Pixel-work limit
+- **WHEN** the union comparison canvas exceeds 4,000,000 pixels
+- **THEN** Diff shows a processing-limit explanation without allocating that canvas
+- **AND** Before, After, Side by side, Slider and Blink remain available
+
+#### Scenario: Processing fails or the model changes
+- **WHEN** local decoding or processing fails, or an in-flight diff's model is replaced
+- **THEN** failures are explained locally, stale results cannot replace the current comparison, and transient resources are released
+
+### Requirement: Interactive Image Comparison
+
+Slider SHALL reveal After to the left of a movable divider and Before to its right, without stretching. The divider SHALL support pointer/touch and keyboard operation with an accessible percentage. Blink SHALL alternate versions only when selected and visible, offer Pause/Resume, start paused under reduced motion, and release its timer when inactive. Neither interaction SHALL change review state or read versions again.
+
+#### Scenario: Slider endpoints and keyboard
+- **WHEN** the reader drags the divider or uses arrow keys, Home or End
+- **THEN** its accessible reveal percentage follows the wipe, clamped to 0–100
+- **AND** 0 shows Before and 100 shows After
+- **AND** operating the divider neither pans the zoom frame nor opens another window
+
+#### Scenario: Blink is explicit and pausable
+- **WHEN** Blink is selected without reduced motion
+- **THEN** it alternates Before and After at 500 ms intervals and offers Pause
+- **AND** Pause freezes the current version and Resume restarts alternation
+
+#### Scenario: Reduced motion and hidden content
+- **WHEN** reduced motion is requested, or the comparison becomes hidden or leaves the viewport
+- **THEN** reduced motion starts Blink paused until explicitly resumed, and hidden content does not alternate
+- **AND** leaving Blink or unmounting releases its timer
 
 ### Requirement: Host Slot Updates Re-render Only Their File
 
